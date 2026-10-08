@@ -1,0 +1,43 @@
+// Caso de prueba: aplicar promociones por escala
+{
+  "Nombre": "Promoción escala 15%",
+  "Peticion": {
+    "CodigoSucursal": "CMX",
+    "ComentarioPredefinidoR1": "Basado en operación de Retail One ",
+    "EsModificacion": false,
+    "EsMonedaNacional": true,
+    "Autorizaciones": null,
+    "ArticulosAgrupados": [{ "Codigo": "RB0005", "Cantidad": 4.0 }],
+    "Partidas": [
+      { "Codigo": "RB0006", "Cantidad": 1.0, "Precio": 89.50 },
+      { "Codigo": "RB0005", "Cantidad": 2.0, "Precio": 120.00 }
+    ]
+  },
+  // Fragmento de la respuesta que se espera. Solo se comparan las propiedades declaradas;
+  // los arreglos deben tener el mismo número de elementos y un elemento que no interese va
+  // como {}. Los números se comparan con tolerancia de 0.0001.
+  /* Sin "Esperado", el caso solo muestra la respuesta para revisarla ([REVISAR]). */
+  "Esperado": {
+    "Exito": true,
+    "Datos": {
+      "Estatus": "Aplicadas",
+      "PorcDescuentoEscala": 15.000000,
+      "Totales": { "ImpuestoIncluido": false, "Subtotal": 1416.40, "Impuesto": 0.00, "PorcDescuento": 15.000000, "Total": 1203.94 },
+      "Partidas": [
+        { "NumeroPartida": 1, "NumeroPartidaOrigen": 1, "Codigo": "RB0006", "Cantidad": 1.0, "TienePromocion": true, "Descuento": 13.43 },
+        { "NumeroPartida": 2, "NumeroPartidaOrigen": 2, "Codigo": "RB0005", "Cantidad": 2.0, "TienePromocion": true, "Descuento": 36.00 },
+        { "NumeroPartida": 3, "NumeroPartidaOrigen": 3, "Codigo": "RPAST0003", "Cantidad": 1.0, "TienePromocion": false },
+        { "NumeroPartida": 4, "NumeroPartidaOrigen": 4, "Codigo": "RCF0003", "Cantidad": 1.0, "TienePromocion": false },
+        { "NumeroPartida": 5, "NumeroPartidaOrigen": 5, "Codigo": "RCF0011", "Cantidad": 5.0, "TienePromocion": true, "Descuento": 22.50 },
+        { "NumeroPartida": 6, "NumeroPartidaOrigen": 6, "Codigo": "RCF0007", "Cantidad": 2.0, "TienePromocion": false },
+        { "NumeroPartida": 7, "NumeroPartidaOrigen": 7, "Codigo": "RPOSTRE0001", "Cantidad": 1.0, "TienePromocion": false },
+        { "NumeroPartida": 8, "NumeroPartidaOrigen": 8, "Codigo": "RB0006", "Cantidad": 1.0, "TienePromocion": true, "Descuento": 13.43 },
+        { "NumeroPartida": 9, "NumeroPartidaOrigen": 9, "Codigo": "RB0005", "Cantidad": 1.0, "TienePromocion": true, "Descuento": 18.00 },
+        { "NumeroPartida": 10, "NumeroPartidaOrigen": 10, "Codigo": "RB0005", "Cantidad": 1.0, "TienePromocion": true, "Descuento": 18.00 },
+        { "NumeroPartida": 11, "NumeroPartidaOrigen": 11, "Codigo": "RB0005", "Cantidad": 2.0, "TienePromocion": true, "Descuento": 36.00 },
+        { "NumeroPartida": 12, "NumeroPartidaOrigen": 12, "Codigo": "RPOSTRE0001", "Cantidad": 2.0, "TienePromocion": false },
+        { "NumeroPartida": 13, "NumeroPartidaOrigen": 11, "Codigo": "RB0005", "Cantidad": 1.0, "TienePromocion": true, "Descuento": 18.00 },
+      ]
+    }
+  }
+}
