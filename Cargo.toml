@@ -1,6 +1,6 @@
 [package]
 name = "jsonviewer"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Visor de JSON ligero: texto formateado, árbol plegable/compacto y tabla"
 
