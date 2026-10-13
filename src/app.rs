@@ -14,6 +14,7 @@ use crate::common::Out;
 use crate::diff::{self, Diff, DiffView};
 use crate::grid::{self, Grid};
 use crate::highlight::{self, Palette};
+use crate::icons::{self, Icon};
 use crate::import;
 use crate::json::{self, Doc, Layout, NONE, NodeId, ParseError};
 use crate::settings::{InitialFold, Settings, View};
@@ -459,28 +460,36 @@ impl App {
             ui.label(RichText::new("Abre otro JSON en una pestaña para comparar").weak());
             return;
         };
-        ui.label("Comparar con:");
         let current = self.tabs[ri].title.clone();
-        egui::ComboBox::from_id_salt("compare_with").selected_text(current).width(160.0).show_ui(ui, |ui| {
-            for (uid, title) in &others {
-                ui.selectable_value(&mut self.compare_with, Some(*uid), title);
-            }
-        });
-        if ui.button("⇄").on_hover_text("Intercambiar lados").clicked() {
+        egui::ComboBox::from_id_salt("compare_with")
+            .selected_text(current)
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                for (uid, title) in &others {
+                    ui.selectable_value(&mut self.compare_with, Some(*uid), title);
+                }
+            })
+            .response
+            .on_hover_text("Pestaña con la que se compara la activa (a la derecha)");
+        if icons::button(ui, Icon::ArrowLeftRight, "Intercambiar lados").clicked() {
             self.compare_with = Some(self.tabs[self.active].uid);
             self.active = ri;
         }
-        ui.separator();
-        ui.checkbox(&mut self.set.diff_sort_keys, "Ignorar orden de claves");
-        ui.checkbox(&mut self.set.diff_only_changes, "Solo diferencias")
-            .on_hover_text("Pliega las líneas iguales lejos de un cambio");
-        ui.checkbox(&mut self.set.diff_show_list, "Lista de cambios");
-        ui.separator();
+        toolbar_sep(ui);
+        icons::toggle(ui, &mut self.set.diff_sort_keys, Icon::ArrowDownAZ, "Ignorar orden de claves");
+        icons::toggle(
+            ui,
+            &mut self.set.diff_only_changes,
+            Icon::Diff,
+            "Solo diferencias: pliega las líneas iguales lejos de un cambio",
+        );
+        icons::toggle(ui, &mut self.set.diff_show_list, Icon::List, "Lista de cambios por ruta");
+        toolbar_sep(ui);
         if let Some((_, d, v)) = self.diff.as_mut() {
-            if ui.button("▲").on_hover_text("Diferencia anterior (Mayús+F7)").clicked() {
+            if icons::button(ui, Icon::ChevronUp, "Diferencia anterior (Mayús+F7)").clicked() {
                 v.step(false);
             }
-            if ui.button("▼").on_hover_text("Diferencia siguiente (F7)").clicked() {
+            if icons::button(ui, Icon::ChevronDown, "Diferencia siguiente (F7)").clicked() {
                 v.step(true);
             }
             if d.is_identical() {
@@ -705,93 +714,63 @@ impl App {
 
     // ---------------------------------------------------------------- paneles
 
-    fn menu_bar(&mut self, ui: &mut Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Archivo", |ui| {
-                if ui.add(egui::Button::new("Abrir…").shortcut_text("Ctrl+O")).clicked() {
-                    ui.close();
-                    self.open_dialog();
+    /// Menú con lo que no cabe en la barra: recientes, tema, atajos, salir.
+    fn overflow_menu(&mut self, ui: &mut Ui) {
+        let mut pick: Option<PathBuf> = None;
+        let mut clear_recent = false;
+        let mut close = false;
+        let mut help = false;
+        let mut quit = false;
+        icons::menu(ui, Icon::Menu, "Menú", |ui| {
+            ui.menu_button(icons::text(Icon::History, "Recientes"), |ui| {
+                if self.set.recent.is_empty() {
+                    ui.label(RichText::new("(vacío)").weak());
                 }
-                if ui.add(egui::Button::new("Nuevo (pegar/escribir)").shortcut_text("Ctrl+N")).clicked() {
-                    ui.close();
-                    self.new_blank();
-                    self.set.view = View::Source;
-                }
-                if ui.add(egui::Button::new("Pegar como documento nuevo").shortcut_text("Ctrl+V")).clicked() {
-                    ui.close();
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-                }
-                if ui.add(egui::Button::new("Importar tabla de SQL Server…").shortcut_text("Ctrl+I")).clicked() {
-                    ui.close();
-                    self.open_import(String::new());
-                }
-                let has_path = self.tabs.get(self.active).is_some_and(|t| t.path.is_some());
-                if ui.add_enabled(has_path, egui::Button::new("Recargar").shortcut_text("F5")).clicked() {
-                    ui.close();
-                    self.reload();
-                }
-                ui.menu_button("Recientes", |ui| {
-                    if self.set.recent.is_empty() {
-                        ui.label(RichText::new("(vacío)").weak());
-                    }
-                    let mut pick = None;
-                    for p in &self.set.recent {
-                        if ui.button(p).clicked() {
-                            pick = Some(PathBuf::from(p));
-                            ui.close();
-                        }
-                    }
-                    if !self.set.recent.is_empty() {
-                        ui.separator();
-                        if ui.button("Limpiar lista").clicked() {
-                            self.set.recent.clear();
-                            ui.close();
-                        }
-                    }
-                    if let Some(p) = pick {
-                        self.open_path(p);
-                    }
-                });
-                ui.separator();
-                let loaded = self.tabs.get(self.active).is_some_and(|t| t.loaded.is_some());
-                if ui.add_enabled(loaded, egui::Button::new("Guardar formateado como…")).clicked() {
-                    ui.close();
-                    self.save_current(true);
-                }
-                if ui.add_enabled(loaded, egui::Button::new("Guardar minificado como…")).clicked() {
-                    ui.close();
-                    self.save_current(false);
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(!self.tabs.is_empty(), egui::Button::new("Cerrar pestaña").shortcut_text("Ctrl+W"))
-                    .clicked()
-                {
-                    ui.close();
-                    self.close_tab(self.active);
-                }
-                if ui.button("Salir").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            ui.menu_button("Ver", |ui| {
-                for (v, label, key) in VIEWS {
-                    if ui.add(egui::Button::selectable(self.set.view == v, label).shortcut_text(key)).clicked() {
-                        self.set.view = v;
+                for p in &self.set.recent {
+                    if ui.button(p).clicked() {
+                        pick = Some(PathBuf::from(p));
                         ui.close();
                     }
                 }
-                ui.separator();
-                ui.checkbox(&mut self.set.dark, "Tema oscuro");
-                ui.checkbox(&mut self.set.show_settings, "Panel de ajustes");
-            });
-            ui.menu_button("Ayuda", |ui| {
-                if ui.button("Atajos de teclado").clicked() {
-                    self.show_help = true;
-                    ui.close();
+                if !self.set.recent.is_empty() {
+                    ui.separator();
+                    if icons::item(ui, Icon::Trash2, "Limpiar lista", "").clicked() {
+                        clear_recent = true;
+                    }
                 }
             });
+            ui.separator();
+            if icons::item_enabled(ui, !self.tabs.is_empty(), Icon::X, "Cerrar pestaña", "Ctrl+W").clicked() {
+                close = true;
+            }
+            ui.separator();
+            let (icon, label) = if self.set.dark { (Icon::Sun, "Tema claro") } else { (Icon::Moon, "Tema oscuro") };
+            if icons::item(ui, icon, label, "").clicked() {
+                self.set.dark = !self.set.dark;
+            }
+            if icons::item(ui, Icon::Keyboard, "Atajos de teclado", "").clicked() {
+                help = true;
+            }
+            ui.separator();
+            if icons::item(ui, Icon::LogOut, "Salir", "").clicked() {
+                quit = true;
+            }
         });
+        if let Some(p) = pick {
+            self.open_path(p);
+        }
+        if clear_recent {
+            self.set.recent.clear();
+        }
+        if close {
+            self.close_tab(self.active);
+        }
+        if help {
+            self.show_help = true;
+        }
+        if quit {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     fn save_current(&mut self, pretty: bool) {
@@ -802,78 +781,114 @@ impl App {
         self.save_as(content);
     }
 
+    /// Una sola fila: archivo · vistas · herramientas de la vista · paneles y menú.
     fn toolbar(&mut self, ui: &mut Ui) {
         let view = self.current_view();
         ui.horizontal(|ui| {
-            for (v, label, key) in VIEWS {
-                if ui.selectable_label(view == v, label).on_hover_text(key).clicked() {
+            ui.spacing_mut().item_spacing.x = 2.0;
+
+            // Archivo
+            if icons::button(ui, Icon::FolderOpen, "Abrir archivo… (Ctrl+O)").clicked() {
+                self.open_dialog();
+            }
+            if icons::button(ui, Icon::FilePlus, "Nuevo documento para escribir (Ctrl+N)").clicked() {
+                self.new_blank();
+                self.set.view = View::Source;
+            }
+            if icons::button(ui, Icon::ClipboardPaste, "Pegar como documento nuevo (Ctrl+V)").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
+            if icons::button(ui, Icon::Database, "Importar tabla de SQL Server… (Ctrl+I)").clicked() {
+                self.open_import(String::new());
+            }
+            let has_path = self.tabs.get(self.active).is_some_and(|t| t.path.is_some());
+            if icons::enabled_button(ui, has_path, Icon::RefreshCw, "Recargar archivo (F5)").clicked() {
+                self.reload();
+            }
+            let loaded = self.tabs.get(self.active).is_some_and(|t| t.loaded.is_some());
+            let mut save_pretty = None;
+            if loaded {
+                icons::menu(ui, Icon::Save, "Guardar como…", |ui| {
+                    if icons::item(ui, Icon::Braces, "Formateado…", "").clicked() {
+                        save_pretty = Some(true);
+                    }
+                    if icons::item(ui, Icon::Minimize2, "Minificado…", "").clicked() {
+                        save_pretty = Some(false);
+                    }
+                });
+            } else {
+                icons::enabled_button(ui, false, Icon::Save, "Guardar como…");
+            }
+            if let Some(pretty) = save_pretty {
+                self.save_current(pretty);
+            }
+            toolbar_sep(ui);
+
+            // Vistas
+            for (v, icon, label, key) in VIEWS {
+                if icons::selectable(ui, view == v, icon, &format!("{label} ({key})")).clicked() {
                     self.set.view = v;
                 }
             }
-            ui.separator();
+            toolbar_sep(ui);
 
+            // Herramientas de la vista
             let set = &mut self.set;
             let mut msg = None;
-            let mut save: Option<String> = None;
             if view == View::Compare {
                 self.compare_toolbar(ui);
             } else if let Some(tab) = self.tabs.get_mut(self.active) {
                 match (view, tab.shown_mut()) {
                     (View::Tree, Some(l)) => {
-                        if ui.button("Expandir todo").clicked() {
+                        if icons::button(ui, Icon::UnfoldVertical, "Expandir todo").clicked() {
                             l.tree.set_all(Fold::Expanded);
                         }
-                        if ui.button("Cerrar todo").clicked() {
+                        if icons::button(ui, Icon::FoldVertical, "Cerrar todo").clicked() {
                             l.tree.level(&l.doc, 1, Fold::Closed);
                         }
-                        if ui.button("Compactar todo").on_hover_text("Raíz expandida, cada hijo en una línea").clicked()
+                        if icons::button(ui, Icon::ListCollapse, "Compactar todo: raíz abierta, cada hijo en una línea")
+                            .clicked()
                         {
                             l.tree.level(&l.doc, 1, Fold::Compact);
                         }
-                        if ui
-                            .button("Auto")
-                            .on_hover_text("Compacta en una línea todo lo que quepa en el ancho indicado")
-                            .clicked()
-                        {
+                        let auto_tip = format!(
+                            "Auto: compacta en una línea lo que quepa en {} columnas (se ajusta en Ajustes)",
+                            set.auto_width
+                        );
+                        if icons::button(ui, Icon::WandSparkles, &auto_tip).clicked() {
                             l.tree.auto(&l.doc, Doc::ROOT, set);
                         }
-                        ui.add(egui::DragValue::new(&mut set.auto_width).range(20..=400).suffix(" col"))
-                            .on_hover_text("Ancho para Auto");
-                        ui.separator();
-                        ui.label("Nivel:");
-                        for lv in 1..=5 {
-                            if ui.small_button(lv.to_string()).clicked() {
-                                let rest = if set.level_compact { Fold::Compact } else { Fold::Closed };
-                                l.tree.level(&l.doc, lv, rest);
+                        icons::menu(ui, Icon::Layers, "Expandir hasta un nivel", |ui| {
+                            for lv in 1..=5 {
+                                if ui.button(format!("Nivel {lv}")).clicked() {
+                                    let rest = if set.level_compact { Fold::Compact } else { Fold::Closed };
+                                    l.tree.level(&l.doc, lv, rest);
+                                    ui.close();
+                                }
                             }
-                        }
-                        ui.checkbox(&mut set.level_compact, "resto compacto");
+                            ui.separator();
+                            ui.checkbox(&mut set.level_compact, "Resto compacto").on_hover_text(
+                                "Lo que queda fuera del nivel se compacta en una línea en vez de cerrarse",
+                            );
+                        });
                     }
                     (View::Table, Some(l)) => {
-                        if ui.button("Expandir todo").clicked() {
+                        if icons::button(ui, Icon::UnfoldVertical, "Expandir todo").clicked() {
                             l.table.set_open(&l.doc, Doc::ROOT, true, true);
                         }
-                        if ui.button("Contraer todo").clicked() {
+                        if icons::button(ui, Icon::FoldVertical, "Contraer todo").clicked() {
                             l.table.collapse_all();
                         }
-                        ui.checkbox(&mut set.table_preview, "Vista previa de objetos");
                     }
                     (View::Text, Some(l)) => {
-                        ui.label("Sangría:");
-                        indent_picker(ui, &mut set.indent);
                         l.text.ensure(&l.doc, &set.indent_str());
-                        if ui.button("Copiar todo").clicked() {
+                        if icons::button(ui, Icon::Copy, "Copiar todo el texto").clicked() {
                             ui.ctx().copy_text(l.text.text().to_string());
                             msg = Some("Texto copiado");
                         }
-                        if ui.button("Guardar como…").clicked() {
-                            save = Some(l.text.text().to_string());
-                        }
                     }
                     _ => {
-                        if ui
-                            .add_enabled(tab.source_dirty, egui::Button::new("Aplicar"))
-                            .on_hover_text("Ctrl+Enter")
+                        if icons::enabled_button(ui, tab.source_dirty, Icon::Check, "Aplicar cambios (Ctrl+Enter)")
                             .clicked()
                         {
                             tab.parse(set);
@@ -881,11 +896,8 @@ impl App {
                         let fmt = |src: &str, layout: Layout| {
                             json::parse(src).map(|d| json::to_string(&d, Doc::ROOT, layout))
                         };
-                        if ui
-                            .button("Formatear")
-                            .on_hover_text("Reescribe la fuente con sangría (quita comentarios)")
-                            .clicked()
-                        {
+                        let format_tip = "Formatear: reescribe la fuente con sangría (quita comentarios)";
+                        if icons::button(ui, Icon::IndentIncrease, format_tip).clicked() {
                             match fmt(&tab.source, Layout::Pretty(&set.indent_str())) {
                                 Ok(s) => {
                                     tab.source = s;
@@ -894,7 +906,7 @@ impl App {
                                 Err(_) => msg = Some("No se puede formatear: el JSON tiene errores"),
                             }
                         }
-                        if ui.button("Minificar").clicked() {
+                        if icons::button(ui, Icon::Minimize2, "Minificar: todo en una línea").clicked() {
                             match fmt(&tab.source, Layout::Minified) {
                                 Ok(s) => {
                                     tab.source = s;
@@ -903,7 +915,7 @@ impl App {
                                 Err(_) => msg = Some("No se puede minificar: el JSON tiene errores"),
                             }
                         }
-                        if ui.button("Copiar").clicked() {
+                        if icons::button(ui, Icon::Copy, "Copiar la fuente").clicked() {
                             ui.ctx().copy_text(tab.source.clone());
                             msg = Some("Fuente copiada");
                         }
@@ -913,14 +925,17 @@ impl App {
             if let Some(m) = msg {
                 self.notify(m);
             }
-            if let Some(content) = save {
-                self.save_as(content);
-            }
 
+            // Paneles y menú
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.toggle_value(&mut self.set.show_settings, "Ajustes");
-                ui.toggle_value(&mut self.set.show_filter, "Filtro por claves")
-                    .on_hover_text("Mostrar solo ciertas claves y el camino hasta ellas");
+                self.overflow_menu(ui);
+                icons::toggle(ui, &mut self.set.show_settings, Icon::Settings2, "Ajustes");
+                icons::toggle(
+                    ui,
+                    &mut self.set.show_filter,
+                    Icon::Filter,
+                    "Filtro por claves: mostrar solo ciertas claves y el camino hasta ellas",
+                );
             });
         });
     }
@@ -928,21 +943,26 @@ impl App {
     fn search_box(&mut self, ui: &mut Ui) {
         {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 let mut go = None;
-                if ui.small_button("▼").on_hover_text("Siguiente (F3 / Enter)").clicked() {
+                if icons::button(ui, Icon::ChevronDown, "Siguiente coincidencia (F3 / Enter)").clicked() {
                     go = Some(true);
                 }
-                if ui.small_button("▲").on_hover_text("Anterior (Mayús+F3 / Mayús+Enter)").clicked() {
+                if icons::button(ui, Icon::ChevronUp, "Coincidencia anterior (Mayús+F3 / Mayús+Enter)").clicked() {
                     go = Some(false);
                 }
                 if let Some(c) = self.match_count() {
-                    ui.label(RichText::new(format!("{c} coinc.")).weak());
+                    ui.label(RichText::new(c.to_string()).weak()).on_hover_text(if c == 1 {
+                        "1 coincidencia"
+                    } else {
+                        "Coincidencias"
+                    });
                 }
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.search)
                         .id(Id::new("search_box"))
-                        .hint_text("Buscar clave o valor (Ctrl+F)")
-                        .desired_width(240.0),
+                        .hint_text(icons::text(Icon::Search, "Buscar clave o valor (Ctrl+F)"))
+                        .desired_width(220.0),
                 );
                 if self.focus_search {
                     // Seleccionar todo para sobrescribir la búsqueda anterior.
@@ -975,7 +995,7 @@ impl App {
         let mut rects = Vec::with_capacity(self.tabs.len());
         let mut dragging = None;
         ui.horizontal(|ui| {
-            let tabs_w = (ui.available_width() - 420.0).max(120.0);
+            let tabs_w = (ui.available_width() - 340.0).max(120.0);
             egui::ScrollArea::horizontal().id_salt("tabs").max_width(tabs_w).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -1008,10 +1028,7 @@ impl App {
                         rects.push(rect);
                     }
                     ui.add_space(4.0);
-                    let plus =
-                        egui::Button::new(RichText::new("+").size(ui.text_style_height(&TextStyle::Button) + 3.0))
-                            .frame(false);
-                    if ui.add(plus).on_hover_text("Nuevo (Ctrl+N)").clicked() {
+                    if icons::button(ui, Icon::Plus, "Nuevo documento (Ctrl+N)").clicked() {
                         new = true;
                     }
                 });
@@ -1153,13 +1170,20 @@ impl App {
     fn settings_panel(&mut self, ui: &mut Ui) {
         let s = &mut self.set;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("Ajustes");
+            ui.horizontal(|ui| {
+                ui.heading(icons::text(Icon::Settings2, "Ajustes"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::button(ui, Icon::X, "Ocultar panel").clicked() {
+                        s.show_settings = false;
+                    }
+                });
+            });
             ui.add_space(4.0);
             egui::Grid::new("settings_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                 ui.label("Tema");
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut s.dark, true, "Oscuro");
-                    ui.selectable_value(&mut s.dark, false, "Claro");
+                    ui.selectable_value(&mut s.dark, true, icons::text(Icon::Moon, "Oscuro"));
+                    ui.selectable_value(&mut s.dark, false, icons::text(Icon::Sun, "Claro"));
                 });
                 ui.end_row();
                 ui.label("Tamaño de letra");
@@ -1206,7 +1230,7 @@ impl App {
             ui.checkbox(&mut s.table_preview, "Vista previa de objetos y arreglos");
 
             ui.separator();
-            if ui.button("Restablecer valores predeterminados").clicked() {
+            if ui.button(icons::text(Icon::RotateCcw, "Restablecer valores predeterminados")).clicked() {
                 let recent = std::mem::take(&mut s.recent);
                 let filter_keys = std::mem::take(&mut s.filter_keys);
                 *s = Settings { recent, filter_keys, show_settings: true, ..Default::default() };
@@ -1216,9 +1240,9 @@ impl App {
 
     fn filter_panel(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.strong("Filtro por claves");
+            ui.heading(icons::text(Icon::Filter, "Filtro por claves"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new("×").frame(false)).on_hover_text("Ocultar panel").clicked() {
+                if icons::button(ui, Icon::X, "Ocultar panel").clicked() {
                     self.set.show_filter = false;
                 }
             });
@@ -1273,8 +1297,7 @@ impl App {
                                 Some(c) => ui.label(RichText::new(c.to_string()).weak()).on_hover_text("Coincidencias"),
                                 None => ui.label(""),
                             };
-                            if ui.add(egui::Button::new("×").frame(false)).on_hover_text("Quitar esta clave").clicked()
-                            {
+                            if icons::small(ui, Icon::X, "Quitar esta clave").clicked() {
                                 remove = Some(i);
                             }
                         }
@@ -1287,7 +1310,7 @@ impl App {
         }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.add_enabled(n > 1, egui::Button::new("Quitar todas")).clicked() {
+            if ui.add_enabled(n > 1, egui::Button::new(icons::text(Icon::Trash2, "Quitar todas"))).clicked() {
                 self.set.filter_keys.clear();
             }
         });
@@ -1321,11 +1344,14 @@ impl App {
                 .inner_margin(egui::Margin::symmetric(8, 4))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("⚠ {e}")).color(ui.visuals().error_fg_color));
+                        ui.label(
+                            RichText::new(icons::text(Icon::TriangleAlert, &e.to_string()))
+                                .color(ui.visuals().error_fg_color),
+                        );
                         if tab.loaded.is_some() {
                             ui.label(RichText::new("· se muestra la última versión válida").weak());
                         }
-                        if ui.small_button("Ir al error").clicked() {
+                        if ui.small_button(icons::text(Icon::Crosshair, "Ir al error")).clicked() {
                             goto = true;
                         }
                     });
@@ -1354,14 +1380,14 @@ impl App {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let what = if total == 1 { "coincidencia" } else { "coincidencias" };
-                        ui.label(format!("Filtro por claves: {total} {what}"));
+                        ui.label(icons::text(Icon::Filter, &format!("Filtro por claves: {total} {what}")));
                         if !missing.is_empty() {
                             ui.label(
                                 RichText::new(format!("· sin coincidencias: {}", missing.join(", ")))
                                     .color(ui.visuals().warn_fg_color),
                             );
                         }
-                        if ui.small_button("Quitar filtro").clicked() {
+                        if ui.small_button(icons::text(Icon::FilterX, "Quitar filtro")).clicked() {
                             filter_off = true;
                         }
                     });
@@ -1408,13 +1434,20 @@ impl App {
     }
 }
 
-const VIEWS: [(View, &str, &str); 5] = [
-    (View::Tree, "Árbol", "Ctrl+1"),
-    (View::Table, "Tabla", "Ctrl+2"),
-    (View::Text, "Texto", "Ctrl+3"),
-    (View::Source, "Fuente", "Ctrl+4"),
-    (View::Compare, "Comparar", "Ctrl+5"),
+const VIEWS: [(View, Icon, &str, &str); 5] = [
+    (View::Tree, Icon::ListTree, "Árbol", "Ctrl+1"),
+    (View::Table, Icon::Table, "Tabla", "Ctrl+2"),
+    (View::Text, Icon::FileJson, "Texto formateado", "Ctrl+3"),
+    (View::Source, Icon::SquarePen, "Fuente: editar el texto original", "Ctrl+4"),
+    (View::Compare, Icon::GitCompare, "Comparar dos pestañas", "Ctrl+5"),
 ];
+
+/// Separador vertical con un poco de aire a los lados.
+fn toolbar_sep(ui: &mut Ui) {
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
+}
 
 fn indent_picker(ui: &mut Ui, indent: &mut usize) {
     ui.horizontal(|ui| {
@@ -1467,7 +1500,8 @@ fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool) -> (Rect, Option<TabAction>
     let font = TextStyle::Button.resolve(ui.style());
     let mut label = t.title.clone();
     if t.error.is_some() {
-        label.push_str(" ⚠");
+        label.push(' ');
+        label.push(Icon::TriangleAlert.unicode());
     }
     let galley = ui.painter().layout_no_wrap(label, font, Color32::PLACEHOLDER);
     let size = vec2(TAB_PAD + galley.size().x + 6.0 + TAB_CLOSE + 5.0, tab_height(ui));
@@ -1601,13 +1635,15 @@ fn welcome(ui: &mut Ui) -> Option<Welcome> {
         ui.horizontal(|ui| {
             let w = 450.0;
             ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
-            if ui.button("Abrir archivo…").clicked() {
+            if ui.button(icons::text(Icon::FolderOpen, "Abrir archivo…")).on_hover_text("Ctrl+O").clicked() {
                 open = Some(Welcome::Open);
             }
-            if ui.button("Pegar del portapapeles").clicked() {
+            if ui.button(icons::text(Icon::ClipboardPaste, "Pegar del portapapeles")).on_hover_text("Ctrl+V").clicked()
+            {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             }
-            if ui.button("Importar tabla de SQL Server…").on_hover_text("Ctrl+I").clicked() {
+            if ui.button(icons::text(Icon::Database, "Importar tabla de SQL Server…")).on_hover_text("Ctrl+I").clicked()
+            {
                 open = Some(Welcome::Import);
             }
         });
@@ -1701,6 +1737,7 @@ fn setup_fonts(ctx: &egui::Context) {
     if fonts.font_data.contains_key("segoeui") {
         fonts.families.entry(FontFamily::Monospace).or_default().push("segoeui".into());
     }
+    icons::install(&mut fonts);
     ctx.set_fonts(fonts);
 }
 
@@ -1714,7 +1751,6 @@ impl eframe::App for App {
         let top_frame =
             egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 2, bottom: 0 });
         egui::Panel::top("top").show_separator_line(false).frame(top_frame).show(ui, |ui| {
-            self.menu_bar(ui);
             self.toolbar(ui);
             ui.add_space(2.0);
             self.tab_strip(ui);

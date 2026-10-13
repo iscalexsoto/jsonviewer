@@ -4,6 +4,7 @@
 use eframe::egui::{self, Id, Key, RichText};
 use serde::{Deserialize, Serialize};
 
+use crate::icons::{self, Icon};
 use crate::json;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -284,12 +285,17 @@ pub fn window(ctx: &egui::Context, d: &mut Dialog, o: &mut ImportOptions, indent
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cancelar").clicked() {
+                    if ui.button(icons::text(Icon::X, "Cancelar")).clicked() {
                         action = Some(Action::Close);
                     }
                     let ok = d.summary.is_some_and(|(rows, _, _)| rows > 0);
-                    let convert = ui.add_enabled(ok, egui::Button::new("Convertir a JSON")).on_hover_text("Ctrl+Enter");
-                    if ui.add_enabled(!d.text.is_empty(), egui::Button::new("Limpiar")).clicked() {
+                    let convert = ui
+                        .add_enabled(ok, egui::Button::new(icons::text(Icon::Check, "Convertir a JSON")))
+                        .on_hover_text("Ctrl+Enter");
+                    if ui
+                        .add_enabled(!d.text.is_empty(), egui::Button::new(icons::text(Icon::Eraser, "Limpiar")))
+                        .clicked()
+                    {
                         d.text.clear();
                         d.dirty = true;
                         d.focus = true;

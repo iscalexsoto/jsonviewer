@@ -10,6 +10,7 @@ egui_extras = "0.36"
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 similar = "3.2.0"
+lucide-icons = "1.56"
 
 [profile.release]
 opt-level = 3

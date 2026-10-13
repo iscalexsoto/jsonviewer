@@ -13,7 +13,7 @@ Pensado para revisar documentos grandes, compararlos y quedarse solo con lo que 
 - Lista de archivos recientes y recarga del archivo con F5.
 
 ### Importar tabla de SQL Server
-Convierte el resultado de una consulta de SQL Server Management Studio en JSON (Ctrl+I o **Archivo → Importar
+Convierte el resultado de una consulta de SQL Server Management Studio en JSON (Ctrl+I o el botón **Importar
 tabla de SQL Server…**).
 
 - En SSMS: clic derecho sobre los resultados → **Copy with Headers** (Ctrl+Mayús+C) y pégalo en la ventana.
@@ -34,7 +34,7 @@ tabla de SQL Server…**).
 ### Vistas
 | Vista | Atajo | Para qué sirve |
 |---|---|---|
-| **Árbol** | Ctrl+1 | Plegar, expandir o compactar en una línea cualquier nodo. Modo *Auto*: compacta todo lo que quepa en un ancho dado. Botones por nivel, guías de sangría, números de línea y conteo de elementos en nodos cerrados. |
+| **Árbol** | Ctrl+1 | Plegar, expandir o compactar en una línea cualquier nodo. Modo *Auto*: compacta todo lo que quepa en un ancho dado. Menú de niveles, guías de sangría, números de línea y conteo de elementos en nodos cerrados. |
 | **Tabla** | Ctrl+2 | Estilo «Inspección» de Visual Studio: Nombre, Valor y Tipo, con vista previa de objetos y arreglos. |
 | **Texto** | Ctrl+3 | El JSON formateado con sangría de 2, 4 o tabulador; copiar todo o guardar. |
 | **Fuente** | Ctrl+4 | Editor del texto original con validación en vivo, *Formatear* y *Minificar*. Si hay un error, indica línea y columna y lleva hasta él. |
@@ -65,12 +65,12 @@ Muestra solo ciertas claves y el camino más corto desde la raíz hasta ellas. P
 ### Comparar dos JSON
 Al estilo de las extensiones de comparación de VS Code:
 
-- Lado a lado: la pestaña activa a la izquierda y la elegida en «Comparar con:» a la derecha (⇄ intercambia los lados).
+- Lado a lado: la pestaña activa a la izquierda y la elegida en el desplegable de la barra a la derecha (el botón ⇄ intercambia los lados).
 - Líneas alineadas: en rojo lo que solo está a la izquierda, en verde lo de la derecha y, en las líneas modificadas, los caracteres exactos que cambiaron.
 - **Ignorar orden de claves** para que `{"a":1,"b":2}` y `{"b":2,"a":1}` cuenten como iguales.
 - **Solo diferencias** oculta las líneas iguales y deja contexto alrededor de cada cambio.
 - **Lista de cambios** por ruta JSON (`~` modificado, `+` añadido, `−` eliminado); clic para saltar a esa línea.
-- Navegación con ▲ ▼ o F7 / Mayús+F7, y una regla lateral con la posición de todas las diferencias.
+- Navegación con los botones de diferencia anterior / siguiente o F7 / Mayús+F7, y una regla lateral con la posición de todas las diferencias.
 - Desplazamiento horizontal sincronizado (Mayús + rueda o barra inferior).
 - Si el filtro por claves está activo, solo se comparan esas claves.
 
@@ -111,7 +111,7 @@ automáticamente.
 | Ctrl+C | Copiar el valor seleccionado |
 | Ctrl / Alt / Mayús + clic en ▶ | Compactar / compactar hijos / expandir subárbol |
 
-La lista completa está en el menú **Ayuda → Atajos de teclado**.
+La lista completa está en el menú ☰ de la barra → **Atajos de teclado**.
 
 ## Compilar y ejecutar
 

@@ -10,6 +10,7 @@ use similar::{Algorithm, DiffOp, capture_diff_slices, capture_diff_slices_deadli
 
 use crate::common;
 use crate::highlight::{JobSink, Palette};
+use crate::icons::Icon;
 use crate::json::{self, Doc, Kind, NONE, NodeId};
 
 /// Las líneas más largas no se comparan carácter a carácter.
@@ -487,7 +488,7 @@ pub fn show(
         ui.painter().text(
             pos2(r.left() + 8.0, r.center().y),
             egui::Align2::LEFT_CENTER,
-            if i == 0 { format!("◀ {t}") } else { format!("▶ {t}") },
+            crate::icons::text(if i == 0 { Icon::ArrowLeft } else { Icon::ArrowRight }, t),
             TextStyle::Button.resolve(ui.style()),
             ui.visuals().strong_text_color(),
         );
