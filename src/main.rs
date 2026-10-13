@@ -5,6 +5,7 @@ mod common;
 mod diff;
 mod grid;
 mod highlight;
+mod import;
 mod json;
 mod settings;
 mod table;

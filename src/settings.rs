@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::import::ImportOptions;
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub enum View {
     Tree,
@@ -54,6 +56,8 @@ pub struct Settings {
     pub diff_only_changes: bool,
     /// Comparación: mostrar la lista de cambios por ruta.
     pub diff_show_list: bool,
+    /// Opciones de «Importar tabla de SQL Server».
+    pub import: ImportOptions,
 }
 
 impl Default for Settings {
@@ -84,6 +88,7 @@ impl Default for Settings {
             diff_sort_keys: true,
             diff_only_changes: false,
             diff_show_list: true,
+            import: ImportOptions::default(),
         }
     }
 }

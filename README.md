@@ -12,6 +12,18 @@ Pensado para revisar documentos grandes, compararlos y quedarse solo con lo que 
 - Conserva el orden de las claves, las claves duplicadas y el texto original de los números (`15.000000` se ve tal cual).
 - Lista de archivos recientes y recarga del archivo con F5.
 
+### Importar tabla de SQL Server
+Convierte el resultado de una consulta de SQL Server Management Studio en JSON (Ctrl+I o **Archivo → Importar
+tabla de SQL Server…**).
+
+- En SSMS: clic derecho sobre los resultados → **Copy with Headers** (Ctrl+Mayús+C) y pégalo en la ventana.
+- Cada fila se convierte en un objeto y la tabla en un arreglo; se abre en una pestaña nueva («Tabla 1», …).
+- Opciones: primera fila con encabezados, `NULL` → `null`, detectar números (`34.800000` y `1218` sin comillas;
+  `001` o `12:18PM` quedan como texto) y una sola fila como objeto en lugar de arreglo.
+- Columnas repetidas o sin nombre se renombran (`Code`, `Code_2`, `Columna3`); los valores con saltos de línea se
+  vuelven a unir en su fila.
+- Pegar con Ctrl+V una tabla copiada de SSMS fuera de un campo de texto abre directamente esta ventana.
+
 ### Pestañas
 - Varios documentos abiertos a la vez, cada uno en su pestaña.
 - Reordenables arrastrándolas.
@@ -78,6 +90,7 @@ automáticamente.
 | Ctrl+O | Abrir archivo(s) |
 | Ctrl+V | Pegar JSON como documento nuevo |
 | Ctrl+N | Documento nuevo para escribir |
+| Ctrl+I | Importar tabla de SQL Server |
 | Ctrl+W / clic medio | Cerrar pestaña |
 | Ctrl+Tab | Siguiente pestaña |
 | F2 / doble clic en pestaña | Cambiar el nombre de la pestaña |

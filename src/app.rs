@@ -14,6 +14,7 @@ use crate::common::Out;
 use crate::diff::{self, Diff, DiffView};
 use crate::grid::{self, Grid};
 use crate::highlight::{self, Palette};
+use crate::import;
 use crate::json::{self, Doc, Layout, NONE, NodeId, ParseError};
 use crate::settings::{InitialFold, Settings, View};
 use crate::table::{self, TableState};
@@ -170,6 +171,9 @@ pub struct App {
     active: usize,
     next_uid: u64,
     paste_n: usize,
+    table_n: usize,
+    /// Ventana «Importar tabla de SQL Server».
+    import: Option<import::Dialog>,
     search: String,
     focus_search: bool,
     /// ((pestaña, generación del filtro), búsqueda, coincidencias)
@@ -209,6 +213,8 @@ impl App {
             active: 0,
             next_uid: 1,
             paste_n: 0,
+            table_n: 0,
+            import: None,
             search: String::new(),
             focus_search: false,
             count_cache: None,
@@ -303,8 +309,31 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
+        // Una tabla copiada de SQL Server abre la ventana de importación.
+        if import::looks_like_table(&text) {
+            return self.open_import(text);
+        }
         self.paste_n += 1;
         self.push_tab(format!("Pegado {}", self.paste_n), None, text);
+    }
+
+    fn open_import(&mut self, text: String) {
+        self.import = Some(import::Dialog::new(text));
+    }
+
+    fn import_window(&mut self, ctx: &egui::Context) {
+        let Some(d) = self.import.as_mut() else { return };
+        let indent = self.set.indent_str();
+        match import::window(ctx, d, &mut self.set.import, &indent) {
+            Some(import::Action::Convert(json, rows)) => {
+                self.import = None;
+                self.table_n += 1;
+                self.push_tab(format!("Tabla {}", self.table_n), None, json);
+                self.notify(format!("Tabla importada: {rows} {}", if rows == 1 { "fila" } else { "filas" }));
+            }
+            Some(import::Action::Close) => self.import = None,
+            None => {}
+        }
     }
 
     fn new_blank(&mut self) {
@@ -623,10 +652,17 @@ impl App {
             self.reload();
         }
         if apply {
-            let set = self.set.clone();
-            if let Some(t) = self.tabs.get_mut(self.active) {
-                t.parse(&set);
+            if let Some(d) = self.import.as_mut() {
+                d.submit = true;
+            } else {
+                let set = self.set.clone();
+                if let Some(t) = self.tabs.get_mut(self.active) {
+                    t.parse(&set);
+                }
             }
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&sc(Modifiers::COMMAND, Key::I))) && self.import.is_none() {
+            self.open_import(String::new());
         }
         if next_tab && !self.tabs.is_empty() {
             self.active = (self.active + 1) % self.tabs.len();
@@ -684,6 +720,10 @@ impl App {
                 if ui.add(egui::Button::new("Pegar como documento nuevo").shortcut_text("Ctrl+V")).clicked() {
                     ui.close();
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                }
+                if ui.add(egui::Button::new("Importar tabla de SQL Server…").shortcut_text("Ctrl+I")).clicked() {
+                    ui.close();
+                    self.open_import(String::new());
                 }
                 let has_path = self.tabs.get(self.active).is_some_and(|t| t.path.is_some());
                 if ui.add_enabled(has_path, egui::Button::new("Recargar").shortcut_text("F5")).clicked() {
@@ -1256,8 +1296,10 @@ impl App {
 
     fn central(&mut self, ui: &mut Ui) {
         if self.tabs.is_empty() {
-            if welcome(ui) {
-                self.open_dialog();
+            match welcome(ui) {
+                Some(Welcome::Open) => self.open_dialog(),
+                Some(Welcome::Import) => self.open_import(String::new()),
+                None => {}
             }
             return;
         }
@@ -1541,9 +1583,14 @@ fn human_size(n: usize) -> String {
     }
 }
 
-/// Pantalla inicial. Devuelve `true` si se pulsó "Abrir archivo".
-fn welcome(ui: &mut Ui) -> bool {
-    let mut open = false;
+enum Welcome {
+    Open,
+    Import,
+}
+
+/// Pantalla inicial. Devuelve el botón pulsado.
+fn welcome(ui: &mut Ui) -> Option<Welcome> {
+    let mut open = None;
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.3);
         ui.heading("Visor JSON");
@@ -1552,13 +1599,16 @@ fn welcome(ui: &mut Ui) -> bool {
         ui.label(RichText::new("Se aceptan comentarios // y /* */ y comas finales.").weak());
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            let w = 260.0;
+            let w = 450.0;
             ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
             if ui.button("Abrir archivo…").clicked() {
-                open = true;
+                open = Some(Welcome::Open);
             }
             if ui.button("Pegar del portapapeles").clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
+            if ui.button("Importar tabla de SQL Server…").on_hover_text("Ctrl+I").clicked() {
+                open = Some(Welcome::Import);
             }
         });
     });
@@ -1679,6 +1729,7 @@ impl eframe::App for App {
         self.sync_filter();
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
 
+        self.import_window(&ctx);
         if self.show_help {
             egui::Window::new("Atajos de teclado").open(&mut self.show_help).resizable(false).show(&ctx, help_ui);
         }
@@ -1712,6 +1763,7 @@ fn help_ui(ui: &mut Ui) {
             ("Ctrl+O", "Abrir archivo(s)"),
             ("Ctrl+V", "Pegar JSON como documento nuevo"),
             ("Ctrl+N", "Documento nuevo para escribir"),
+            ("Ctrl+I", "Importar tabla de SQL Server (Copy with Headers)"),
             ("Ctrl+W / clic medio", "Cerrar pestaña"),
             ("Ctrl+Tab", "Siguiente pestaña"),
             ("F2 / doble clic en pestaña", "Cambiar el nombre de la pestaña (se usa al guardar)"),
