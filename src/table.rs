@@ -3,7 +3,7 @@
 use eframe::egui::{self, Rect, Sense, TextStyle, Ui, pos2, vec2};
 use egui_extras::{Column, TableBuilder};
 
-use crate::common::{self, NavKeys, Out, Tri};
+use crate::common::{self, Mark, NavKeys, Out, Tri};
 use crate::highlight::{JobSink, Palette};
 use crate::json::{self, Doc, Kind, Layout, NONE, NodeId, Sink, Tok};
 use crate::settings::Settings;
@@ -161,6 +161,7 @@ fn value_job(
     s.finish()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut Ui,
     doc: &Doc,
@@ -169,6 +170,7 @@ pub fn ui(
     pal: &Palette,
     query: &str,
     keys: bool,
+    mark: Option<Mark>,
 ) -> Option<Out> {
     let font = TextStyle::Monospace.resolve(ui.style());
     let row_h = ui.fonts_mut(|f| f.row_height(&font)).round() + 4.0;
@@ -286,7 +288,7 @@ pub fn ui(
                         }
                         ui.separator();
                     }
-                    if let Some(o) = common::node_menu(ui, doc, id, set) {
+                    if let Some(o) = common::node_menu(ui, doc, id, set, mark) {
                         out = Some(o);
                     }
                 });

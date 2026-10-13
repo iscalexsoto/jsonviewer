@@ -10,7 +10,7 @@ use eframe::egui::{
     vec2,
 };
 
-use crate::common::Out;
+use crate::common::{Mark, Out};
 use crate::diff::{self, Diff, DiffView};
 use crate::grid::{self, Grid};
 use crate::highlight::{self, Palette};
@@ -65,6 +65,75 @@ pub struct DocTab {
     filter_gen: u64,
     /// Aumenta cada vez que el documento se vuelve a analizar.
     doc_gen: u64,
+    /// Pestaña temporal de comparación entre dos elementos (sin documento propio).
+    compare: Option<ElemCompare>,
+}
+
+/// Comparación de dos elementos (de la misma pestaña o de distintas), con copia
+/// propia de cada subárbol. Vive en una pestaña temporal, como el diff de VS Code.
+pub struct ElemCompare {
+    left: Doc,
+    right: Doc,
+    /// Ruta de cada lado, precedida del nombre de la pestaña si no es la misma.
+    titles: (String, String),
+    /// (ordenar claves, sangría) con que se calculó `diff`.
+    key: Option<(bool, String)>,
+    diff: Option<(Diff, DiffView)>,
+}
+
+impl ElemCompare {
+    fn ensure(&mut self, set: &Settings) {
+        let key = (set.diff_sort_keys, set.indent_str());
+        if self.key.as_ref() != Some(&key) {
+            self.diff = Some((Diff::new(&self.left, &self.right, &key.1, key.0), DiffView::default()));
+            self.key = Some(key);
+        }
+    }
+
+    fn swap(&mut self) {
+        std::mem::swap(&mut self.left, &mut self.right);
+        std::mem::swap(&mut self.titles.0, &mut self.titles.1);
+        self.key = None;
+        self.diff = None;
+    }
+
+    /// Título corto para la pestaña: `Partidas[3] ↔ Partidas[7]` (último tramo de
+    /// cada ruta; la ruta completa si los dos tramos fueran iguales).
+    fn tab_title(&self) -> String {
+        let (a, b) = (self.titles.0.as_str(), self.titles.1.as_str());
+        fn last(t: &str) -> &str {
+            match t.rfind('.') {
+                Some(i) => &t[i + 1..],
+                None => t.strip_prefix('$').unwrap_or(t),
+            }
+        }
+        let (sa, sb) = (last(a), last(b));
+        if sa != sb && !sa.is_empty() && !sb.is_empty() {
+            format!("{sa} ↔ {sb}")
+        } else {
+            let full = |t: &str| t.strip_prefix("$.").unwrap_or(t).to_string();
+            format!("{} ↔ {}", full(a), full(b))
+        }
+    }
+}
+
+/// Nodo marcado con «Seleccionar para comparar».
+struct CompareMark {
+    /// Pestaña y versión del documento (y del filtro) donde se marcó.
+    uid: u64,
+    doc_gen: u64,
+    filter_gen: u64,
+    id: NodeId,
+    path: String,
+    tab_title: String,
+}
+
+impl CompareMark {
+    /// El marcador tal como lo ven las vistas de la pestaña `t`.
+    fn view<'a>(&'a self, t: &DocTab) -> Mark<'a> {
+        let same = t.uid == self.uid && t.shown_gen() == (self.doc_gen, self.filter_gen);
+        Mark { path: &self.path, id: if same { self.id } else { NONE } }
+    }
 }
 
 impl DocTab {
@@ -82,6 +151,7 @@ impl DocTab {
             filter_counts: Vec::new(),
             filter_gen: 0,
             doc_gen: 0,
+            compare: None,
         };
         if !t.source.trim().is_empty() {
             t.parse(set);
@@ -90,7 +160,12 @@ impl DocTab {
     }
 
     fn is_blank(&self) -> bool {
-        self.path.is_none() && self.source.trim().is_empty()
+        self.path.is_none() && self.source.trim().is_empty() && self.compare.is_none()
+    }
+
+    /// Versión del documento mostrado: cambia al reanalizar o al cambiar el filtro.
+    fn shown_gen(&self) -> (u64, u64) {
+        (self.doc_gen, if self.filtered.is_some() { self.filter_gen } else { 0 })
     }
 
     /// Lo que muestran las vistas: el documento filtrado si hay filtro, si no el completo.
@@ -190,6 +265,8 @@ pub struct App {
     /// Pestaña con la que se compara la activa.
     compare_with: Option<u64>,
     diff: Option<(DiffKey, Diff, DiffView)>,
+    /// Elemento marcado con «Seleccionar para comparar».
+    mark: Option<CompareMark>,
 }
 
 /// (uid, versión del documento, generación del filtro) de cada lado, orden de claves, sangría.
@@ -227,6 +304,7 @@ impl App {
             filter_gen: 1,
             compare_with: None,
             diff: None,
+            mark: None,
         };
         for f in files {
             app.open_path(f);
@@ -417,14 +495,14 @@ impl App {
     /// Índice de la pestaña con la que se compara la activa. Si no hay una válida,
     /// elige la anterior (o la siguiente).
     fn compare_target(&mut self) -> Option<usize> {
+        let usable = |i: usize, t: &DocTab| i != self.active && t.compare.is_none();
         let found = self.compare_with.and_then(|uid| self.tabs.iter().position(|t| t.uid == uid));
-        let i = match found.filter(|&i| i != self.active) {
+        let i = match found.filter(|&i| usable(i, &self.tabs[i])) {
             Some(i) => i,
             None => {
-                if self.tabs.len() < 2 {
-                    return None;
-                }
-                let i = if self.active > 0 { self.active - 1 } else { 1 };
+                // La anterior si sirve; si no, la más cercana que tenga documento.
+                let prev = self.active.checked_sub(1).filter(|&i| usable(i, &self.tabs[i]));
+                let i = prev.or_else(|| self.tabs.iter().enumerate().position(|(i, t)| usable(i, t)))?;
                 self.compare_with = Some(self.tabs[i].uid);
                 i
             }
@@ -453,7 +531,7 @@ impl App {
             .tabs
             .iter()
             .enumerate()
-            .filter(|&(i, _)| i != self.active)
+            .filter(|&(i, t)| i != self.active && t.compare.is_none())
             .map(|(_, t)| (t.uid, t.title.clone()))
             .collect();
         let Some(ri) = self.ensure_diff().or_else(|| self.compare_target()) else {
@@ -476,37 +554,26 @@ impl App {
             self.active = ri;
         }
         toolbar_sep(ui);
-        icons::toggle(ui, &mut self.set.diff_sort_keys, Icon::ArrowDownAZ, "Ignorar orden de claves");
-        icons::toggle(
-            ui,
-            &mut self.set.diff_only_changes,
-            Icon::Diff,
-            "Solo diferencias: pliega las líneas iguales lejos de un cambio",
-        );
-        icons::toggle(ui, &mut self.set.diff_show_list, Icon::List, "Lista de cambios por ruta");
-        toolbar_sep(ui);
-        if let Some((_, d, v)) = self.diff.as_mut() {
-            if icons::button(ui, Icon::ChevronUp, "Diferencia anterior (Mayús+F7)").clicked() {
-                v.step(false);
-            }
-            if icons::button(ui, Icon::ChevronDown, "Diferencia siguiente (F7)").clicked() {
-                v.step(true);
-            }
-            if d.is_identical() {
-                ui.label(RichText::new("Sin diferencias").color(ui.visuals().hyperlink_color));
-            } else {
-                ui.label(v.position_label());
-                ui.label(RichText::new(format!("+{} −{} ~{} líneas", d.added, d.removed, d.modified)).weak())
-                    .on_hover_text("Añadidas, eliminadas y modificadas");
-            }
+        let diff = self.diff.as_mut().map(|(_, d, v)| (&*d, v));
+        diff_tools(ui, &mut self.set, diff);
+    }
+
+    /// Barra de la pestaña temporal de comparación de elementos.
+    fn elem_compare_toolbar(&mut self, ui: &mut Ui) {
+        let Some(c) = self.tabs.get_mut(self.active).and_then(|t| t.compare.as_mut()) else { return };
+        if icons::button(ui, Icon::ArrowLeftRight, "Intercambiar lados").clicked() {
+            c.swap();
         }
+        toolbar_sep(ui);
+        c.ensure(&self.set);
+        diff_tools(ui, &mut self.set, c.diff.as_mut().map(|(d, v)| (&*d, v)));
     }
 
     fn compare_ui(&mut self, ui: &mut Ui) {
         let Some(ri) = self.ensure_diff() else {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
-                if self.tabs.len() < 2 {
+                if self.tabs.iter().filter(|t| t.compare.is_none()).count() < 2 {
                     ui.label("Para comparar necesitas al menos dos pestañas.");
                     ui.label(RichText::new("Abre o pega otro JSON (Ctrl+O, Ctrl+V) y vuelve a esta vista.").weak());
                 } else {
@@ -518,18 +585,77 @@ impl App {
         let query = self.search.to_ascii_lowercase();
         let titles = (self.tabs[self.active].title.clone(), self.tabs[ri].title.clone());
         let Some((_, d, v)) = self.diff.as_mut() else { return };
-        if d.approximate {
-            ui.label(
-                RichText::new("Documentos muy distintos: la alineación de líneas es aproximada.")
-                    .color(ui.visuals().warn_fg_color),
-            );
+        diff_body(ui, &mut self.set, &self.pal, &query, d, v, (&titles.0, &titles.1));
+    }
+
+    /// Contenido de la pestaña temporal de comparación de elementos.
+    fn elem_compare_ui(&mut self, ui: &mut Ui) {
+        let query = self.search.to_ascii_lowercase();
+        let Some(c) = self.tabs.get_mut(self.active).and_then(|t| t.compare.as_mut()) else { return };
+        c.ensure(&self.set);
+        let titles = (c.titles.0.as_str(), c.titles.1.as_str());
+        let Some((d, v)) = c.diff.as_mut() else { return };
+        diff_body(ui, &mut self.set, &self.pal, &query, d, v, titles);
+    }
+
+    /// La pestaña activa es una comparación de elementos.
+    fn on_elem_compare(&self) -> bool {
+        self.tabs.get(self.active).is_some_and(|t| t.compare.is_some())
+    }
+
+    /// Guarda el nodo marcado con «Seleccionar para comparar».
+    fn mark_for_compare(&mut self, id: NodeId) {
+        let Some(t) = self.tabs.get(self.active) else { return };
+        let Some(l) = t.shown() else { return };
+        let (doc_gen, filter_gen) = t.shown_gen();
+        let path = l.doc.path(id);
+        self.mark =
+            Some(CompareMark { uid: t.uid, doc_gen, filter_gen, id, path: path.clone(), tab_title: t.title.clone() });
+        self.notify(format!("Seleccionado para comparar: {path}. Clic derecho en otro elemento → «Comparar con…»"));
+    }
+
+    /// Compara el nodo marcado con `id` de la pestaña activa en una pestaña temporal.
+    fn compare_with_mark(&mut self, id: NodeId) {
+        let Some(m) = self.mark.as_ref() else { return };
+        let Some(mi) = self.tabs.iter().position(|t| t.uid == m.uid) else {
+            self.mark = None;
+            return self.notify("La pestaña del elemento marcado ya se cerró");
+        };
+        let mt = &self.tabs[mi];
+        if mt.shown_gen() != (m.doc_gen, m.filter_gen) {
+            self.mark = None;
+            return self.notify("El documento cambió: vuelve a marcar el elemento a comparar");
         }
-        if self.set.diff_show_list && !d.changes.is_empty() {
-            egui::Panel::right("diff_changes").default_size(320.0).show(ui, |ui| diff::changes_list(ui, d, v));
+        let (Some(ml), Some(rl)) = (mt.shown(), self.tabs[self.active].shown()) else { return };
+        if mi == self.active && m.id == id {
+            return self.notify("Elige un elemento distinto del marcado");
         }
-        diff::show(ui, d, v, (&titles.0, &titles.1), self.set.diff_only_changes, &self.pal, &query);
-        if std::mem::take(&mut v.want_all) {
-            self.set.diff_only_changes = false;
+        let left = ml.doc.subtree(m.id);
+        let right = rl.doc.subtree(id);
+        let right_path = rl.doc.path(id);
+        let titles = if mi == self.active {
+            (m.path.clone(), right_path)
+        } else {
+            (format!("{} · {}", m.tab_title, m.path), format!("{} · {}", self.tabs[self.active].title, right_path))
+        };
+        let c = ElemCompare { left, right, titles, key: None, diff: None };
+        let title = c.tab_title();
+        // Una sola pestaña temporal: la siguiente comparación la reutiliza (como VS Code).
+        match self.tabs.iter().position(|t| t.compare.is_some()) {
+            Some(i) => {
+                let t = &mut self.tabs[i];
+                t.compare = Some(c);
+                t.title = title;
+                self.active = i;
+            }
+            None => {
+                let mut t = DocTab::new(self.next_uid, title, None, String::new(), &self.set);
+                self.next_uid += 1;
+                t.compare = Some(c);
+                let at = (self.active + 1).min(self.tabs.len());
+                self.tabs.insert(at, t);
+                self.active = at;
+            }
         }
     }
 
@@ -550,7 +676,7 @@ impl App {
         let view = self.current_view();
         let indent = self.set.indent_str();
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        let found = match (view, tab.shown_mut()) {
+        let found = match (if tab.compare.is_some() { View::Compare } else { view }, tab.shown_mut()) {
             (View::Tree | View::Table, Some(l)) => {
                 let doc = &l.doc;
                 let n = doc.len() as u64;
@@ -679,8 +805,15 @@ impl App {
         let (diff_next, diff_prev) = ctx.input_mut(|i| {
             (i.consume_shortcut(&sc(Modifiers::NONE, Key::F7)), i.consume_shortcut(&sc(Modifiers::SHIFT, Key::F7)))
         });
-        if (diff_next || diff_prev) && self.current_view() == View::Compare {
-            if let Some((_, _, v)) = self.diff.as_mut() {
+        if diff_next || diff_prev {
+            let view = if self.on_elem_compare() {
+                self.tabs[self.active].compare.as_mut().and_then(|c| c.diff.as_mut()).map(|(_, v)| v)
+            } else if self.current_view() == View::Compare {
+                self.diff.as_mut().map(|(_, _, v)| v)
+            } else {
+                None
+            };
+            if let Some(v) = view {
                 v.step(diff_next);
             }
         }
@@ -824,18 +957,24 @@ impl App {
             }
             toolbar_sep(ui);
 
-            // Vistas
-            for (v, icon, label, key) in VIEWS {
-                if icons::selectable(ui, view == v, icon, &format!("{label} ({key})")).clicked() {
-                    self.set.view = v;
+            // Vistas (sin efecto en una pestaña de comparación de elementos)
+            let elem_compare = self.on_elem_compare();
+            ui.add_enabled_ui(!elem_compare, |ui| {
+                for (v, icon, label, key) in VIEWS {
+                    let on = !elem_compare && view == v;
+                    if icons::selectable(ui, on, icon, &format!("{label} ({key})")).clicked() {
+                        self.set.view = v;
+                    }
                 }
-            }
+            });
             toolbar_sep(ui);
 
             // Herramientas de la vista
             let set = &mut self.set;
             let mut msg = None;
-            if view == View::Compare {
+            if elem_compare {
+                self.elem_compare_toolbar(ui);
+            } else if view == View::Compare {
                 self.compare_toolbar(ui);
             } else if let Some(tab) = self.tabs.get_mut(self.active) {
                 match (view, tab.shown_mut()) {
@@ -1139,7 +1278,19 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(tab) = self.tabs.get(self.active) {
+                if let Some(c) = self.tabs.get(self.active).and_then(|t| t.compare.as_ref()) {
+                    if let Some((d, _)) = &c.diff {
+                        let s = format!(
+                            "{} ↔ {} nodos · +{} −{} ~{} líneas",
+                            c.left.len(),
+                            c.right.len(),
+                            d.added,
+                            d.removed,
+                            d.modified
+                        );
+                        ui.label(RichText::new(s).weak());
+                    }
+                } else if let Some(tab) = self.tabs.get(self.active) {
                     let mut parts = vec![human_size(tab.source.len())];
                     if let (Some(l), Some(full)) = (tab.shown(), &tab.loaded) {
                         parts.insert(
@@ -1327,6 +1478,10 @@ impl App {
             return;
         }
         let view = self.current_view();
+        if self.on_elem_compare() {
+            self.elem_compare_ui(ui);
+            return;
+        }
         if view == View::Compare {
             self.compare_ui(ui);
             return;
@@ -1336,6 +1491,7 @@ impl App {
         let set = &self.set;
         let pal = &self.pal;
         let tab = &mut self.tabs[self.active];
+        let mark = self.mark.as_ref().map(|m| m.view(tab));
 
         if let Some(e) = tab.error.clone() {
             let mut goto = false;
@@ -1397,8 +1553,8 @@ impl App {
         let mut out = None;
         let mut reveal = None;
         match (view, tab.shown_mut()) {
-            (View::Tree, Some(l)) => out = tree::ui(ui, &l.doc, &mut l.tree, set, pal, &query, keys),
-            (View::Table, Some(l)) => out = table::ui(ui, &l.doc, &mut l.table, set, pal, &query, keys),
+            (View::Tree, Some(l)) => out = tree::ui(ui, &l.doc, &mut l.tree, set, pal, &query, keys, mark),
+            (View::Table, Some(l)) => out = table::ui(ui, &l.doc, &mut l.table, set, pal, &query, keys, mark),
             (View::Text, Some(l)) => {
                 l.text.ensure(&l.doc, &set.indent_str());
                 text::show(ui, &mut l.text, set, pal, &query);
@@ -1428,9 +1584,66 @@ impl App {
         if filter_off {
             self.set.filter_on = false;
         }
-        if let Some(Out::FilterKey(k)) = out {
-            self.add_filter_key(k);
+        match out {
+            Some(Out::FilterKey(k)) => self.add_filter_key(k),
+            Some(Out::MarkCompare(id)) => self.mark_for_compare(id),
+            Some(Out::CompareWithMark(id)) => self.compare_with_mark(id),
+            _ => {}
         }
+    }
+}
+
+/// Opciones y navegación de una comparación (compartidas por la vista Comparar y la
+/// pestaña de comparación de elementos).
+fn diff_tools(ui: &mut Ui, set: &mut Settings, diff: Option<(&Diff, &mut DiffView)>) {
+    icons::toggle(ui, &mut set.diff_sort_keys, Icon::ArrowDownAZ, "Ignorar orden de claves");
+    icons::toggle(
+        ui,
+        &mut set.diff_only_changes,
+        Icon::Diff,
+        "Solo diferencias: pliega las líneas iguales lejos de un cambio",
+    );
+    icons::toggle(ui, &mut set.diff_show_list, Icon::List, "Lista de cambios por ruta");
+    toolbar_sep(ui);
+    if let Some((d, v)) = diff {
+        if icons::button(ui, Icon::ChevronUp, "Diferencia anterior (Mayús+F7)").clicked() {
+            v.step(false);
+        }
+        if icons::button(ui, Icon::ChevronDown, "Diferencia siguiente (F7)").clicked() {
+            v.step(true);
+        }
+        if d.is_identical() {
+            ui.label(RichText::new("Sin diferencias").color(ui.visuals().hyperlink_color));
+        } else {
+            ui.label(v.position_label());
+            ui.label(RichText::new(format!("+{} −{} ~{} líneas", d.added, d.removed, d.modified)).weak())
+                .on_hover_text("Añadidas, eliminadas y modificadas");
+        }
+    }
+}
+
+/// Cuerpo de una comparación: aviso, lista de cambios y diff lado a lado.
+fn diff_body(
+    ui: &mut Ui,
+    set: &mut Settings,
+    pal: &Palette,
+    query: &str,
+    d: &Diff,
+    v: &mut DiffView,
+    titles: (&str, &str),
+) {
+    if d.approximate {
+        ui.label(
+            RichText::new("Documentos muy distintos: la alineación de líneas es aproximada.")
+                .color(ui.visuals().warn_fg_color),
+        );
+    }
+    if set.diff_show_list && !d.changes.is_empty() {
+        egui::Panel::right("diff_changes").default_size(320.0).show(ui, |ui| diff::changes_list(ui, d, v));
+    }
+    diff::show(ui, d, v, titles, set.diff_only_changes, pal, query);
+    if std::mem::take(&mut v.want_all) {
+        set.diff_only_changes = false;
     }
 }
 
@@ -1542,10 +1755,15 @@ fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool) -> (Rect, Option<TabAction>
         p.circle_filled(c, 3.5, color);
     }
 
-    let hover = format!(
-        "{}\nDoble clic o F2 para cambiar el nombre",
-        t.path.as_ref().map_or("Sin archivo".to_string(), |p| p.display().to_string())
-    );
+    let hover = match (&t.compare, &t.path) {
+        (Some(c), _) => format!(
+            "Comparación de elementos (pestaña temporal: la siguiente comparación la reutiliza)\n{}\n{}",
+            icons::text(Icon::ArrowLeft, &c.titles.0),
+            icons::text(Icon::ArrowRight, &c.titles.1)
+        ),
+        (None, Some(p)) => format!("{}\nDoble clic o F2 para cambiar el nombre", p.display()),
+        (None, None) => "Sin archivo\nDoble clic o F2 para cambiar el nombre".to_string(),
+    };
     let close = close.on_hover_text("Cerrar (Ctrl+W)");
     let resp = resp.on_hover_text(hover);
     let mut act = None;
@@ -1567,7 +1785,10 @@ fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool) -> (Rect, Option<TabAction>
         if t.path.is_some() && ui.button("Copiar ruta del archivo").clicked() {
             act = Some(TabAction::CopyPath);
         }
-        if !active && ui.add(egui::Button::new("Comparar con la pestaña activa").shortcut_text("Ctrl+5")).clicked() {
+        if !active
+            && t.compare.is_none()
+            && ui.add(egui::Button::new("Comparar con la pestaña activa").shortcut_text("Ctrl+5")).clicked()
+        {
             act = Some(TabAction::CompareWithActive);
         }
         ui.separator();
@@ -1823,6 +2044,10 @@ fn help_ui(ui: &mut Ui) {
             ("Alt+clic en ▶", "Compactar hijos"),
             ("Mayús+clic en ▶", "Expandir todo el subárbol"),
             ("Clic derecho", "Más opciones: copiar ruta, cuadrícula, filtrar por clave…"),
+            (
+                "Clic derecho → Seleccionar para comparar",
+                "Marca un elemento; en otro, «Comparar con…» abre el diff en una pestaña",
+            ),
         ] {
             ui.label(RichText::new(k).monospace());
             ui.label(d);

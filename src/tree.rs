@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, Rect, ScrollArea, Sense, Stroke, TextStyle, Ui, pos2, vec2};
 
-use crate::common::{self, NavKeys, Out, Tri};
+use crate::common::{self, Mark, NavKeys, Out, Tri};
 use crate::highlight::{JobSink, Palette};
 use crate::json::{self, Doc, Kind, Layout, NONE, NodeId, Tok};
 use crate::settings::{InitialFold, Settings};
@@ -362,7 +362,14 @@ fn line_job(
     s.finish()
 }
 
-fn context_menu(ui: &mut Ui, doc: &Doc, id: NodeId, set: &Settings, act: &mut Option<(NodeId, Action)>) -> Option<Out> {
+fn context_menu(
+    ui: &mut Ui,
+    doc: &Doc,
+    id: NodeId,
+    set: &Settings,
+    mark: Option<Mark>,
+    act: &mut Option<(NodeId, Action)>,
+) -> Option<Out> {
     let n = doc.node(id);
     if n.kind.is_container() && !n.children.is_empty() {
         let mut item = |ui: &mut Ui, label: &str, shortcut: &str, a: Action| {
@@ -383,9 +390,10 @@ fn context_menu(ui: &mut Ui, doc: &Doc, id: NodeId, set: &Settings, act: &mut Op
         item(ui, "Aplicar este estado a nodos similares", "", Action::ApplySimilar);
         ui.separator();
     }
-    common::node_menu(ui, doc, id, set)
+    common::node_menu(ui, doc, id, set, mark)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ui(
     ui: &mut Ui,
     doc: &Doc,
@@ -394,6 +402,7 @@ pub fn ui(
     pal: &Palette,
     query: &str,
     keys: bool,
+    mark: Option<Mark>,
 ) -> Option<Out> {
     let key_out = if keys {
         st.handle_keys(ui, doc, set);
@@ -504,7 +513,7 @@ pub fn ui(
                 );
             }
             resp.context_menu(|ui| {
-                if let Some(o) = context_menu(ui, doc, line.node, set, &mut act) {
+                if let Some(o) = context_menu(ui, doc, line.node, set, mark, &mut act) {
                     out = Some(o);
                 }
             });

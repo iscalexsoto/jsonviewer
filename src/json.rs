@@ -231,6 +231,33 @@ impl Doc {
     }
 }
 
+impl Doc {
+    /// Copia independiente del subárbol de `id` como documento propio: el nodo
+    /// pasa a ser la raíz (sin clave) y solo se conservan los textos que usa.
+    pub fn subtree(&self, id: NodeId) -> Doc {
+        let (start, end) = (id as usize, self.subtree_end(id) as usize);
+        let base_depth = self.node(id).depth;
+        let mut strs = String::new();
+        let mut nodes = Vec::with_capacity(end - start);
+        for (i, n) in self.nodes[start..end].iter().enumerate() {
+            let text = self.text_of(n);
+            let at = strs.len() as u32;
+            strs.push_str(text);
+            let root = i == 0;
+            nodes.push(Node {
+                kind: n.kind,
+                parent: if root { NONE } else { n.parent - id },
+                index: if root { 0 } else { n.index },
+                depth: n.depth - base_depth,
+                key: if root { NO_KEY } else { n.key },
+                text: (at, text.len() as u32),
+                children: n.children.iter().map(|&c| c - id).collect(),
+            });
+        }
+        Doc { nodes, keys: self.keys.clone(), strs }
+    }
+}
+
 /// Resultado de [`Doc::filter_keys`].
 pub struct KeyFilter {
     pub doc: Doc,
@@ -867,6 +894,20 @@ mod tests {
         assert_eq!(f.path, vec![true, true, false, true, true, false, true, false, false, false]);
         let none = doc.filter_keys(&["NoExiste"]);
         assert_eq!(to_string(&none.doc, 0, Layout::Minified), "{}");
+    }
+
+    #[test]
+    fn subtree_is_independent() {
+        let doc = parse(r#"{"a":"x","items":[{"id":1,"t":"uno"},{"id":2,"t":["dos",null]}]}"#).unwrap();
+        let items = doc.node(0).children[1];
+        let second = doc.node(items).children[1];
+        let sub = doc.subtree(second);
+        assert_eq!(to_string(&sub, 0, Layout::Minified), r#"{"id":2,"t":["dos",null]}"#);
+        assert_eq!(sub.len(), 5);
+        assert!(!sub.node(0).has_key());
+        assert_eq!(sub.node(0).depth, 0);
+        assert_eq!(sub.path(4), "$.t[1]");
+        assert_eq!(sub.subtree_end(0), 5);
     }
 
     #[test]

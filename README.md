@@ -42,6 +42,9 @@ tabla de SQL Server…**).
 
 **Cuadrícula:** un arreglo de objetos se puede ver como hoja de cálculo (tecla G o clic derecho → «Ver como cuadrícula…»).
 
+**Comparar dos elementos:** en Tabla o Árbol, clic derecho en un elemento → «Seleccionar para comparar» y luego clic
+derecho en otro → «Comparar con …». La comparación se abre en una pestaña temporal aparte (ver abajo).
+
 ### Búsqueda
 - Busca en claves y valores (Ctrl+F) y muestra cuántas coincidencias hay.
 - F3 / Mayús+F3 para ir a la siguiente o la anterior; en árbol y tabla se abre el camino hasta el resultado.
@@ -73,6 +76,18 @@ Al estilo de las extensiones de comparación de VS Code:
 - Navegación con los botones de diferencia anterior / siguiente o F7 / Mayús+F7, y una regla lateral con la posición de todas las diferencias.
 - Desplazamiento horizontal sincronizado (Mayús + rueda o barra inferior).
 - Si el filtro por claves está activo, solo se comparan esas claves.
+
+### Comparar dos elementos de un arreglo
+Como el *Select for Compare* / *Compare with Selected* de VS Code, pero con nodos del JSON:
+
+- En Tabla o Árbol, clic derecho en un elemento → **Seleccionar para comparar**. Puede ser cualquier nodo, de esta
+  pestaña o de otra.
+- Clic derecho en el otro elemento → **Comparar con «…»**. Se abre una pestaña temporal `Partidas[3] ↔ Partidas[7]`
+  junto a la actual, con el mismo diff lado a lado (lista de cambios, F7, intercambiar lados, ignorar orden de claves).
+- Solo hay una pestaña temporal: la siguiente comparación la reutiliza, como la pestaña de vista previa de VS Code.
+  Se cierra como cualquier otra (×, clic medio, Ctrl+W).
+- Cada lado es una copia del elemento en ese momento; si el documento se vuelve a analizar o cambia el filtro, hay que
+  volver a marcar el elemento.
 
 ### Copiar y guardar
 - Menú contextual de cada nodo: copiar el valor formateado, en una línea o minificado, el texto sin comillas, la ruta o la clave.

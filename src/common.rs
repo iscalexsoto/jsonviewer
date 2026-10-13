@@ -11,6 +11,19 @@ pub enum Out {
     Grid(NodeId),
     /// Agregar una clave al filtro.
     FilterKey(String),
+    /// Marcar este nodo como lado izquierdo de una comparación de elementos.
+    MarkCompare(NodeId),
+    /// Comparar el nodo marcado con este (abre la pestaña de comparación).
+    CompareWithMark(NodeId),
+}
+
+/// Nodo marcado con «Seleccionar para comparar», tal como lo ven las vistas.
+#[derive(Clone, Copy)]
+pub struct Mark<'a> {
+    /// Ruta del nodo marcado (para el texto del menú).
+    pub path: &'a str,
+    /// El nodo marcado está en el documento que se muestra (`NONE` si es de otra pestaña).
+    pub id: NodeId,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,9 +48,37 @@ pub fn triangle(p: &Painter, c: Pos2, size: f32, t: Tri, color: Color32) {
 }
 
 /// Opciones de copiado comunes a los menús contextuales.
-pub fn node_menu(ui: &mut Ui, doc: &Doc, id: NodeId, set: &Settings) -> Option<Out> {
+pub fn node_menu(ui: &mut Ui, doc: &Doc, id: NodeId, set: &Settings, mark: Option<Mark>) -> Option<Out> {
     let n = doc.node(id);
     let mut out = None;
+    // Comparar dos elementos, al estilo de VS Code: se marca uno y luego se elige el otro.
+    match mark {
+        Some(m) if m.id == id => {
+            ui.add_enabled(false, egui::Button::new("Seleccionado para comparar"));
+        }
+        Some(m) => {
+            let label = format!("Comparar con «{}»", m.path);
+            if ui.button(label).on_hover_text("Abre la comparación en una pestaña aparte").clicked() {
+                out = Some(Out::CompareWithMark(id));
+                ui.close();
+            }
+            if ui.button("Seleccionar para comparar").clicked() {
+                out = Some(Out::MarkCompare(id));
+                ui.close();
+            }
+        }
+        None => {
+            if ui
+                .button("Seleccionar para comparar")
+                .on_hover_text("Luego, clic derecho en otro elemento → «Comparar con…»")
+                .clicked()
+            {
+                out = Some(Out::MarkCompare(id));
+                ui.close();
+            }
+        }
+    }
+    ui.separator();
     if ui.button("Copiar valor (formateado)").clicked() {
         ui.ctx().copy_text(json::to_string(doc, id, Layout::Pretty(&set.indent_str())));
         ui.close();
