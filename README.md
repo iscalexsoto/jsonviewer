@@ -121,7 +121,9 @@ Requiere [Rust](https://www.rust-lang.org/tools/install) (edición 2024).
 cargo run --release -- ejemplos/caso.jsonc
 ```
 
-El ejecutable queda en `target/release/jsonviewer.exe`. Se le pueden pasar uno o varios archivos como argumentos;
+El ejecutable queda en `target/release/jsonviewer.exe`. El ícono de `assets/icon.ico` se incrusta en el .exe al
+compilar (`build.rs` con `winresource`; necesita `windres` del toolchain GNU o `rc.exe` del SDK de Windows).
+Se le pueden pasar uno o varios archivos como argumentos;
 también puede asociarse a la extensión `.json` en Windows para abrirlos con doble clic.
 
 En Windows usa las fuentes Consolas y Segoe UI del sistema si están disponibles.
