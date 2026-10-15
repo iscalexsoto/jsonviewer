@@ -1716,7 +1716,10 @@ fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool) -> (Rect, Option<TabAction>
         label.push(' ');
         label.push(Icon::TriangleAlert.unicode());
     }
-    let galley = ui.painter().layout_no_wrap(label, font, Color32::PLACEHOLDER);
+    let galley = ui.painter().layout_no_wrap(label, font.clone(), Color32::PLACEHOLDER);
+    // Centro vertical de las mayúsculas dentro de la fila: la caja de línea deja espacio
+    // para acentos y descendentes, así que centrarla no centra las letras ni las alinea con la X.
+    let cap_mid = ui.painter().layout_no_wrap("H".into(), font, Color32::PLACEHOLDER).mesh_bounds.center().y;
     let size = vec2(TAB_PAD + galley.size().x + 6.0 + TAB_CLOSE + 5.0, tab_height(ui));
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     // Id estable por pestaña: así el arrastre sigue aunque cambie de posición.
@@ -1741,7 +1744,7 @@ fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool) -> (Rect, Option<TabAction>
         vis.weak_text_color()
     };
     let p = ui.painter();
-    p.galley(pos2(rect.left() + TAB_PAD, rect.center().y - galley.size().y / 2.0 + y_off), galley, color);
+    p.galley(pos2(rect.left() + TAB_PAD, rect.center().y - cap_mid + y_off), galley, color);
 
     // Cierre: solo el glifo, sin fondo de botón. Con cambios sin aplicar se ve un punto.
     let c = close_rect.center();
