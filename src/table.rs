@@ -144,12 +144,25 @@ pub fn ui(
         st.handle_keys(ui, doc, set, row_h);
     }
     let items = &doc.node(Doc::ROOT).children;
-    let ncols = st.cols.len() + usize::from(st.has_other);
     let marked = mark.map_or(NONE, |m| m.id);
     let mark_bg = common::mark_bg(ui);
     let mark_color = ui.visuals().hyperlink_color;
     let missing_bg = ui.visuals().faint_bg_color.gamma_multiply(0.6);
     let weak = ui.visuals().weak_text_color();
+
+    // Ancho inicial de cada columna: el de su nombre en la cabecera más un margen.
+    let head_font = TextStyle::Body.resolve(ui.style());
+    let col_w: Vec<f32> = ui.fonts_mut(|f| {
+        st.cols
+            .iter()
+            .map(|&c| doc.key_of_id(c))
+            .chain(st.has_other.then_some("(valor)"))
+            .map(|name| {
+                let w = f.layout_no_wrap(name.to_owned(), head_font.clone(), egui::Color32::WHITE).size().x;
+                (w + 16.0).clamp(60.0, 400.0)
+            })
+            .collect()
+    });
 
     let mut out = None;
     let mut select = None;
@@ -164,8 +177,8 @@ pub fn ui(
             .auto_shrink(false)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(56.0));
-        for _ in 0..ncols {
-            tb = tb.column(Column::initial(160.0).at_least(40.0).clip(true));
+        for &w in &col_w {
+            tb = tb.column(Column::initial(w).at_least(40.0).clip(true));
         }
         if let Some(r) = st.scroll.take() {
             tb = tb.scroll_to_row(r, Some(Align::Center));
