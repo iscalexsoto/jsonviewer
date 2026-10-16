@@ -119,6 +119,23 @@ Tema oscuro o claro, tamaño de letra, escala de la interfaz, sangría, cómo se
 documento (Auto, por nivel, expandir todo), comas, comillas en claves, índices de arreglo y más. Los ajustes se guardan
 automáticamente.
 
+### Actualizaciones
+Desde la versión 1.4.0 el programa avisa cuando hay una versión nueva publicada en
+[GitHub](https://github.com/iscalexsoto/jsonviewer/releases) y puede instalarla él mismo:
+
+- Al iniciar consulta la última release (como mucho una vez al día y sin bloquear la ventana). Si hay una versión
+  más nueva, la barra de estado muestra «Versión X.Y.Z disponible» con los botones **Actualizar** y **Ver notas**.
+  También se puede buscar a mano en el menú ☰ → **Buscar actualizaciones…**.
+- **Actualizar** descarga el `jsonviewer-X.Y.Z-x64.exe` de la release en la misma carpeta que el ejecutable, comprueba
+  su SHA-256 (el que publica GitHub para cada archivo o el del asset `.sha256` de la release; si no hay ninguno lo
+  indica en el tooltip), renombra el ejecutable actual a `jsonviewer.old.exe` y pone el nuevo en su lugar. Después
+  pregunta si **Reiniciar ahora** (abre la versión nueva con los mismos archivos) o **Más tarde**. El `.old.exe` se
+  borra en el siguiente arranque.
+- Si no se puede reemplazar el ejecutable (carpeta de solo lectura, permisos), el nuevo queda descargado junto al
+  actual y la barra de estado dice dónde, para copiarlo a mano.
+- La comprobación automática se desactiva en Ajustes → **Buscar actualizaciones al iniciar**. No se envía ningún
+  dato aparte de la consulta a la API pública de GitHub.
+
 ## Atajos de teclado
 
 | Atajo | Acción |

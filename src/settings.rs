@@ -76,6 +76,10 @@ pub struct Settings {
     pub diff_show_list: bool,
     /// Opciones de «Importar tabla de SQL Server».
     pub import: ImportOptions,
+    /// Consultar GitHub al iniciar (como mucho una vez al día).
+    pub check_updates: bool,
+    /// Segundos desde la época de la última comprobación automática.
+    pub last_update_check: u64,
 }
 
 impl Default for Settings {
@@ -106,6 +110,8 @@ impl Default for Settings {
             diff_only_changes: false,
             diff_show_list: true,
             import: ImportOptions::default(),
+            check_updates: true,
+            last_update_check: 0,
         }
     }
 }

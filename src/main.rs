@@ -11,8 +11,10 @@ mod settings;
 mod table;
 mod text;
 mod tree;
+mod update;
 
 fn main() -> eframe::Result {
+    update::Updater::cleanup();
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

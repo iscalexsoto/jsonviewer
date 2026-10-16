@@ -20,6 +20,7 @@ use crate::settings::{InitialFold, Settings, View};
 use crate::table::{self, TableState};
 use crate::text::{self, TextState};
 use crate::tree::{self, Fold, TreeState};
+use crate::update::{self, Event, Status, Updater};
 
 /// Por encima de este tamaño el editor de la fuente se desactiva salvo que se pida.
 const SOURCE_EDIT_LIMIT: usize = 4 * 1024 * 1024;
@@ -354,6 +355,7 @@ pub struct App {
     filter_gen: u64,
     /// Elemento marcado con «Seleccionar para comparar».
     mark: Option<CompareMark>,
+    updater: Updater,
 }
 
 /// Pestaña cuyo nombre se está editando.
@@ -387,15 +389,31 @@ impl App {
             filter_sig: String::new(),
             filter_gen: 1,
             mark: None,
+            updater: Updater::default(),
         };
         for f in files {
             app.open_path(f);
+        }
+        if app.updater.check_on_start(&cc.egui_ctx, app.set.check_updates, app.set.last_update_check) {
+            app.set.last_update_check = update::timestamp();
         }
         app
     }
 
     fn notify(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), Instant::now()));
+    }
+
+    /// Resultados del hilo de actualización que merecen un toast.
+    fn poll_updates(&mut self) {
+        let Some(ev) = self.updater.poll() else { return };
+        match ev {
+            Event::UpToDate => self.notify(format!("Ya tienes la última versión ({})", update::CURRENT)),
+            Event::Available(v) => self.notify(format!("Versión {v} disponible (ver la barra de estado)")),
+            Event::Ready(v) => self.notify(format!("Versión {v} instalada: reinicia para usarla")),
+            Event::Saved(p) => self.notify(format!("Ejecutable nuevo guardado en {}", p.display())),
+            Event::Error(e) => self.notify(format!("Actualizaciones: {e}")),
+        }
     }
 
     fn apply_style(&mut self, ctx: &egui::Context) {
@@ -889,6 +907,7 @@ impl App {
         let mut close = false;
         let mut help = false;
         let mut quit = false;
+        let mut check_updates = false;
         icons::menu(ui, Icon::Menu, "Menú", |ui| {
             ui.menu_button(icons::text(Icon::History, "Recientes"), |ui| {
                 if self.set.recent.is_empty() {
@@ -919,11 +938,19 @@ impl App {
             if icons::item(ui, Icon::Keyboard, "Atajos de teclado", "").clicked() {
                 help = true;
             }
+            let r = icons::item_enabled(ui, !self.updater.busy(), Icon::RefreshCw, "Buscar actualizaciones…", "");
+            if r.clicked() {
+                check_updates = true;
+            }
+            r.on_hover_text(format!("Versión actual: {}", update::CURRENT));
             ui.separator();
             if icons::item(ui, Icon::LogOut, "Salir", "").clicked() {
                 quit = true;
             }
         });
+        if check_updates {
+            self.updater.check(ui.ctx(), true);
+        }
         if let Some(p) = pick {
             self.open_path(p);
         }
@@ -1390,12 +1417,101 @@ impl App {
                         }
                     }
                 }
+                self.update_bar(ui);
                 if let Some((m, _)) = &self.toast {
                     ui.separator();
                     ui.label(RichText::new(m).color(ui.visuals().warn_fg_color));
                 }
             });
         });
+    }
+
+    /// Aviso de versión nueva en la barra de estado (se dibuja de derecha a izquierda).
+    fn update_bar(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let accent = ui.visuals().hyperlink_color;
+        match &self.updater.status {
+            Status::Available(rel) => {
+                ui.separator();
+                let notes = ui.small_button("Ver notas").on_hover_text(&rel.notes_url);
+                let tip = format!(
+                    "Descarga {} ({}) junto al ejecutable actual y lo reemplaza; luego se pide reiniciar.\n{}",
+                    rel.asset_name,
+                    human_size(rel.size as usize),
+                    update::sha_note(rel)
+                );
+                let go = ui.small_button(icons::text(Icon::Download, "Actualizar")).on_hover_text(tip);
+                ui.label(RichText::new(format!("Versión {} disponible", rel.version)).color(accent));
+                if notes.clicked() {
+                    ctx.open_url(egui::OpenUrl::new_tab(&rel.notes_url));
+                }
+                if go.clicked() {
+                    self.updater.download(&ctx);
+                }
+            }
+            Status::Downloading { release, received, total } => {
+                ui.separator();
+                let frac = if *total > 0 { (*received as f32 / *total as f32).min(1.0) } else { 0.0 };
+                ui.add(egui::ProgressBar::new(frac).desired_width(110.0).show_percentage());
+                ui.label(RichText::new(format!("Descargando la versión {}…", release.version)).weak());
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            Status::Ready { version } => {
+                ui.separator();
+                let version = version.clone();
+                if self.updater.postponed {
+                    if ui
+                        .small_button(icons::text(Icon::RotateCw, "Reiniciar"))
+                        .on_hover_text("Usar la versión nueva")
+                        .clicked()
+                    {
+                        self.restart(&ctx);
+                    }
+                    ui.label(RichText::new(format!("Versión {version} lista")).weak());
+                } else {
+                    let later = ui
+                        .small_button("Más tarde")
+                        .on_hover_text("La versión nueva se usará la próxima vez que abras el programa");
+                    let now = ui.small_button(icons::text(Icon::RotateCw, "Reiniciar ahora"));
+                    ui.label(RichText::new(format!("Versión {version} instalada")).color(accent));
+                    if later.clicked() {
+                        self.updater.postponed = true;
+                    }
+                    if now.clicked() {
+                        self.restart(&ctx);
+                    }
+                }
+            }
+            Status::Saved { version, path, reason } => {
+                ui.separator();
+                let dismiss = ui.small_button("Descartar aviso");
+                let show = ui.small_button(icons::text(Icon::ExternalLink, "Ver archivo"));
+                let tip = format!(
+                    "{reason}\nEl ejecutable nuevo quedó en:\n{}\nReemplaza con él el actual cuando puedas.",
+                    path.display()
+                );
+                ui.label(
+                    RichText::new(format!("Versión {version} descargada, sin instalar"))
+                        .color(ui.visuals().warn_fg_color),
+                )
+                .on_hover_text(&tip);
+                if show.clicked() {
+                    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+                }
+                if dismiss.clicked() {
+                    self.updater.status = Status::Unchecked;
+                }
+            }
+            Status::Unchecked | Status::Checking | Status::UpToDate | Status::Error(_) => {}
+        }
+    }
+
+    /// Lanza el ejecutable nuevo con los archivos abiertos y cierra este.
+    fn restart(&mut self, ctx: &egui::Context) {
+        let files: Vec<PathBuf> = self.tabs.iter().filter_map(|t| t.path.clone()).collect();
+        if let Err(e) = self.updater.restart(ctx, &files) {
+            self.notify(e);
+        }
     }
 
     fn settings_panel(&mut self, ui: &mut Ui) {
@@ -1455,6 +1571,13 @@ impl App {
                 ui.add(egui::DragValue::new(&mut s.initial_level).range(0..=50));
                 ui.end_row();
             });
+
+            ui.separator();
+            ui.strong("Actualizaciones");
+            ui.checkbox(&mut s.check_updates, "Buscar actualizaciones al iniciar").on_hover_text(
+                "Consulta GitHub como mucho una vez al día y avisa en la barra de estado si hay una versión nueva",
+            );
+            ui.label(RichText::new(format!("Versión actual: {}", update::CURRENT)).weak());
 
             ui.separator();
             if ui.button(icons::text(Icon::RotateCcw, "Restablecer valores predeterminados")).clicked() {
@@ -2131,6 +2254,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.apply_style(&ctx);
         self.handle_input(&ctx);
+        self.poll_updates();
 
         self.sync_filter();
         let top_frame =
