@@ -28,27 +28,43 @@ tabla de SQL Server…**).
 - Varios documentos abiertos a la vez, cada uno en su pestaña.
 - Reordenables arrastrándolas.
 - Nombre editable con doble clic, F2 o clic derecho → «Cambiar nombre…». Ese nombre se propone al guardar.
-- Clic derecho: cambiar nombre, copiar la ruta del archivo, comparar con la pestaña activa, cerrar, cerrar las demás.
+- Clic derecho: cambiar nombre, copiar la ruta del archivo, **Comparar con…** (otra pestaña u otro archivo), cerrar,
+  cerrar las demás.
 - Se cierran con la ×, con clic medio o con Ctrl+W. Un punto (•) indica cambios en la fuente sin aplicar y ⚠ un JSON con errores.
+- Además de las pestañas de documento hay pestañas de **tabla** y de **comparación** (ver abajo); se abren junto a
+  la pestaña desde la que se crearon y puede haber tantas como se quiera.
 
 ### Vistas
 | Vista | Atajo | Para qué sirve |
 |---|---|---|
 | **Árbol** | Ctrl+1 | Plegar, expandir o compactar en una línea cualquier nodo. Modo *Auto*: compacta todo lo que quepa en un ancho dado. Menú de niveles, guías de sangría, números de línea y conteo de elementos en nodos cerrados. |
-| **Tabla** | Ctrl+2 | Estilo «Inspección» de Visual Studio: Nombre, Valor y Tipo, con vista previa de objetos y arreglos. |
-| **Texto** | Ctrl+3 | El JSON formateado con sangría de 2, 4 o tabulador; copiar todo o guardar. |
-| **Fuente** | Ctrl+4 | Editor del texto original con validación en vivo, *Formatear* y *Minificar*. Si hay un error, indica línea y columna y lleva hasta él. |
-| **Comparar** | Ctrl+5 | Diferencias entre dos pestañas (ver abajo). |
+| **Texto** | Ctrl+2 | El JSON formateado con sangría de 2, 4 o tabulador; copiar todo o guardar. |
+| **Fuente** | Ctrl+3 | Editor del texto original con números de línea y validación en vivo, *Formatear* y *Minificar*. Si hay un error, indica línea y columna y lleva hasta él. |
 
-**Cuadrícula:** un arreglo de objetos se puede ver como hoja de cálculo (tecla G o clic derecho → «Ver como cuadrícula…»).
+### Ver un arreglo como tabla
+Para revisar las partidas de un arreglo como si fueran una hoja de cálculo:
 
-**Comparar dos elementos:** en Tabla o Árbol, clic derecho en un elemento → «Seleccionar para comparar» y luego clic
-derecho en otro → «Comparar con …». La comparación se abre en una pestaña temporal aparte (ver abajo).
+- En el árbol, clic derecho sobre el arreglo → **Ver como tabla**, o sobre uno de sus elementos → «Ver como tabla:
+  todo el arreglo». También con la tecla **G**.
+- Para ver solo algunos elementos: selecciónalos con **Ctrl+clic** (uno por uno) o **Mayús+clic** (un rango) y clic
+  derecho → «Ver como tabla: N elementos seleccionados».
+- Se abre una pestaña nueva (`archivo.json · Partidas`, o `… (3 de 20)` si es una selección). Las claves de todos los
+  elementos, en orden de aparición, son las columnas; cada elemento es una fila. La columna **#** es el índice del
+  elemento en el arreglo original.
+- Si un elemento no tiene alguna clave, la celda se muestra con un guion tenue (—) y un fondo distinto, con la
+  explicación al pasar el cursor; así no se confunde con `null` ni con una cadena vacía.
+- Al pasar el cursor por una celda se ve el valor completo formateado. Clic derecho en una fila: copiar la celda, el
+  elemento (formateado, en una línea o minificado), su ruta, o **Seleccionar para comparar** / **Comparar con…**.
+- El botón de copiar de la barra copia la tabla separada por tabuladores, lista para pegar en Excel.
+- Los botones Árbol / Texto / Fuente muestran la misma copia de los elementos como documento; el botón **Tabla**
+  vuelve a la tabla. El filtro por claves deja solo esas columnas (y los elementos que las tienen).
 
 ### Búsqueda
 - Busca en claves y valores (Ctrl+F) y muestra cuántas coincidencias hay.
-- F3 / Mayús+F3 para ir a la siguiente o la anterior; en árbol y tabla se abre el camino hasta el resultado.
-- La barra de estado muestra la ruta del nodo seleccionado (`$.Encabezado.Partidas[3].Codigo`); con clic se copia.
+- F3 / Mayús+F3 para ir a la siguiente o la anterior; en el árbol se abre el camino hasta el resultado y en una tabla
+  se selecciona la fila.
+- La barra de estado muestra la ruta del nodo seleccionado (`$.Encabezado.Partidas[3].Codigo`) y su línea en el
+  archivo; con clic se copia la ruta.
 
 ### Filtro por claves
 Muestra solo ciertas claves y el camino más corto desde la raíz hasta ellas. Por ejemplo, al filtrar por
@@ -62,30 +78,35 @@ Muestra solo ciertas claves y el camino más corto desde la raíz hasta ellas. P
 - No distingue mayúsculas y minúsculas. Cada clave coincidente se muestra con todo su valor.
 - En arreglos solo quedan los elementos que contienen alguna de las claves.
 - Clic derecho en un nodo → «Filtrar por esta clave» la agrega a la lista.
-- Se aplica a las vistas Árbol, Tabla, Texto y Comparar. Copiar y guardar usan el resultado filtrado.
+- Se aplica al árbol, al texto, a las tablas y a las comparaciones. Copiar y guardar usan el resultado filtrado.
 - La lista de claves se guarda entre sesiones.
 
 ### Comparar dos JSON
 Al estilo de las extensiones de comparación de VS Code:
 
-- Lado a lado: la pestaña activa a la izquierda y la elegida en el desplegable de la barra a la derecha (el botón ⇄ intercambia los lados).
+- Clic derecho en una pestaña → **Comparar con…** y se elige otra pestaña abierta o **Otro archivo…** (se abre y se
+  compara). Se crea una pestaña `archivo1.json ↔ archivo2.json` con la primera a la izquierda (el botón ⇄
+  intercambia los lados).
 - Líneas alineadas: en rojo lo que solo está a la izquierda, en verde lo de la derecha y, en las líneas modificadas, los caracteres exactos que cambiaron.
 - **Ignorar orden de claves** para que `{"a":1,"b":2}` y `{"b":2,"a":1}` cuenten como iguales.
 - **Solo diferencias** oculta las líneas iguales y deja contexto alrededor de cada cambio.
 - **Lista de cambios** por ruta JSON (`~` modificado, `+` añadido, `−` eliminado); clic para saltar a esa línea.
 - Navegación con los botones de diferencia anterior / siguiente o F7 / Mayús+F7, y una regla lateral con la posición de todas las diferencias.
 - Desplazamiento horizontal sincronizado (Mayús + rueda o barra inferior).
-- Si el filtro por claves está activo, solo se comparan esas claves.
+- Si el filtro por claves está activo, solo se comparan esas claves; el aviso de arriba muestra las coincidencias y
+  permite quitarlo.
+- Cada lado es una copia del documento en el momento de comparar (la pestaña lo recuerda al pasar el cursor). Puede
+  haber varias comparaciones abiertas a la vez.
 
 ### Comparar dos elementos de un arreglo
 Como el *Select for Compare* / *Compare with Selected* de VS Code, pero con nodos del JSON:
 
-- En Tabla o Árbol, clic derecho en un elemento → **Seleccionar para comparar**. Puede ser cualquier nodo, de esta
-  pestaña o de otra.
-- Clic derecho en el otro elemento → **Comparar con «…»**. Se abre una pestaña temporal `Partidas[3] ↔ Partidas[7]`
-  junto a la actual, con el mismo diff lado a lado (lista de cambios, F7, intercambiar lados, ignorar orden de claves).
-- Solo hay una pestaña temporal: la siguiente comparación la reutiliza, como la pestaña de vista previa de VS Code.
-  Se cierra como cualquier otra (×, clic medio, Ctrl+W).
+- En el árbol o en una tabla, clic derecho en un elemento → **Seleccionar para comparar**. Puede ser cualquier nodo,
+  de esta pestaña o de otra. El elemento marcado queda resaltado con una franja y la etiqueta «para comparar».
+- Clic derecho en el otro elemento → **Comparar con «…»**. Se abre una pestaña
+  `archivo1.json línea 12 ↔ archivo1.json línea 13` (la línea donde empieza cada elemento en su archivo; si el archivo
+  está en una sola línea se usa la ruta) junto a la actual, con el mismo diff lado a lado y los mismos encabezados
+  completos (archivo · ruta · línea).
 - Cada lado es una copia del elemento en ese momento; si el documento se vuelve a analizar o cambia el filtro, hay que
   volver a marcar el elemento.
 
@@ -110,19 +131,20 @@ automáticamente.
 | Ctrl+Tab | Siguiente pestaña |
 | F2 / doble clic en pestaña | Cambiar el nombre de la pestaña |
 | F5 | Recargar archivo |
-| Ctrl+1 … 5 | Árbol / Tabla / Texto / Fuente / Comparar |
+| Ctrl+1 … 3 | Árbol / Texto / Fuente |
 | Ctrl+F, F3, Mayús+F3 | Buscar, siguiente, anterior |
-| F7, Mayús+F7 | Comparar: diferencia siguiente / anterior |
+| F7, Mayús+F7 | Comparación: diferencia siguiente / anterior |
 | Ctrl+Enter | Aplicar cambios de la fuente |
 | ↑ ↓ RePág AvPág Inicio Fin | Moverse (árbol y tabla) |
 | ← → | Cerrar / expandir, ir al padre / primer hijo |
 | Enter, Espacio, doble clic | Expandir / cerrar |
+| Ctrl+clic, Mayús+clic | Seleccionar varios elementos (para verlos como tabla) |
 | C | Compactar nodo en una línea |
 | H | Compactar hijos (cada hijo en una línea) |
 | X | Cerrar hijos |
 | E | Expandir todo el subárbol |
 | A | Auto-compactar el subárbol |
-| G | Ver arreglo como cuadrícula |
+| G | Ver el arreglo (o los elementos seleccionados) como tabla |
 | Ctrl+C | Copiar el valor seleccionado |
 | Ctrl / Alt / Mayús + clic en ▶ | Compactar / compactar hijos / expandir subárbol |
 

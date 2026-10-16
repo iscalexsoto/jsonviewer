@@ -49,6 +49,8 @@ pub struct TreeState {
     line_of: Vec<u32>,
     dirty: bool,
     pub selected: NodeId,
+    /// Selección múltiple (Ctrl+clic o Mayús+clic), ordenada; incluye a `selected` si hay varios.
+    pub multi: Vec<NodeId>,
     /// (nodo, centrar)
     scroll: Option<(NodeId, bool)>,
     offset: f32,
@@ -63,6 +65,7 @@ impl TreeState {
             line_of: Vec::new(),
             dirty: true,
             selected: NONE,
+            multi: Vec::new(),
             scroll: None,
             offset: 0.0,
             view_h: 0.0,
@@ -232,6 +235,38 @@ impl TreeState {
         self.dirty = false;
     }
 
+    /// Clic sobre un nodo: con Ctrl alterna su selección, con Mayús selecciona el rango
+    /// de líneas desde el nodo seleccionado; sin modificadores deja solo este.
+    fn click(&mut self, id: NodeId, ctrl: bool, shift: bool) {
+        if shift && self.selected != NONE {
+            let a = self.line_of[self.selected as usize];
+            let b = self.line_of[id as usize];
+            if a != u32::MAX && b != u32::MAX {
+                let (lo, hi) = (a.min(b) as usize, a.max(b) as usize);
+                self.multi = self.lines[lo..=hi].iter().filter(|l| l.kind != LineKind::Close).map(|l| l.node).collect();
+                self.multi.sort_unstable();
+                return;
+            }
+        }
+        if ctrl {
+            if self.multi.is_empty() && self.selected != NONE && self.selected != id {
+                self.multi.push(self.selected);
+            }
+            match self.multi.binary_search(&id) {
+                Ok(i) => {
+                    self.multi.remove(i);
+                }
+                Err(i) => self.multi.insert(i, id),
+            }
+            if self.multi.len() == 1 {
+                self.multi.clear();
+            }
+        } else if !self.multi.contains(&id) {
+            self.multi.clear();
+        }
+        self.selected = id;
+    }
+
     /// Línea visible del nodo o de su ancestro visible más cercano.
     fn visible_line(&self, doc: &Doc, mut id: NodeId) -> Option<usize> {
         while id != NONE {
@@ -261,6 +296,7 @@ impl TreeState {
         let mut action = None;
         if let Some(delta) = k.row_delta(page) {
             let Some(cur) = self.visible_line(doc, sel) else { return };
+            self.multi.clear();
             let last = self.lines.len() as isize - 1;
             let mut li = (cur as isize + delta).clamp(0, last);
             // Saltar las líneas de cierre.
@@ -368,9 +404,22 @@ fn context_menu(
     id: NodeId,
     set: &Settings,
     mark: Option<Mark>,
+    multi: &[NodeId],
     act: &mut Option<(NodeId, Action)>,
 ) -> Option<Out> {
     let n = doc.node(id);
+    let mut out = None;
+    if let Some((label, table)) = common::table_choice(doc, id, multi) {
+        if ui
+            .add(egui::Button::new(crate::icons::text(crate::icons::Icon::Table, &label)).shortcut_text("G"))
+            .on_hover_text("Abre una pestaña con una columna por clave y una fila por elemento")
+            .clicked()
+        {
+            out = Some(table);
+            ui.close();
+        }
+        ui.separator();
+    }
     if n.kind.is_container() && !n.children.is_empty() {
         let mut item = |ui: &mut Ui, label: &str, shortcut: &str, a: Action| {
             if ui.add(egui::Button::new(label).shortcut_text(shortcut)).clicked() {
@@ -390,7 +439,7 @@ fn context_menu(
         item(ui, "Aplicar este estado a nodos similares", "", Action::ApplySimilar);
         ui.separator();
     }
-    common::node_menu(ui, doc, id, set, mark)
+    common::node_menu(ui, doc, id, set, mark).or(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -406,7 +455,7 @@ pub fn ui(
 ) -> Option<Out> {
     let key_out = if keys {
         st.handle_keys(ui, doc, set);
-        common::grid_key(ui, doc, st.selected)
+        common::table_key(ui, doc, st.selected, &st.multi)
     } else {
         None
     };
@@ -416,7 +465,8 @@ pub fn ui(
 
     let mut out = None;
     let mut act: Option<(NodeId, Action)> = None;
-    let mut select: Option<NodeId> = None;
+    // (nodo, Ctrl, Mayús)
+    let mut select: Option<(NodeId, bool, bool)> = None;
 
     let font = TextStyle::Monospace.resolve(ui.style());
     let (row_h, char_w) = ui.fonts_mut(|f| (f.row_height(&font).round() + 2.0, f.glyph_width(&font, '0')));
@@ -427,9 +477,13 @@ pub fn ui(
     let text_x0 = num_w + arrow_w + 2.0;
 
     let sel_bg = ui.visuals().selection.bg_fill.gamma_multiply(0.45);
+    let multi_bg = ui.visuals().selection.bg_fill.gamma_multiply(0.28);
     let hover_bg = ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(0.5);
+    let mark_bg = common::mark_bg(ui);
+    let mark_color = ui.visuals().hyperlink_color;
     let num_color = ui.visuals().weak_text_color();
     let arrow_color = ui.visuals().text_color();
+    let marked = mark.map_or(NONE, |m| m.id);
 
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     let mut area = ScrollArea::both().auto_shrink(false).id_salt("tree_view");
@@ -443,22 +497,40 @@ pub fn ui(
 
     let lines = &st.lines;
     let selected = st.selected;
+    let multi = &st.multi;
     let output = area.show_rows(ui, row_h, lines.len(), |ui, range| {
         for li in range {
             let line = lines[li];
             let n = doc.node(line.node);
             let text_x = text_x0 + n.depth as f32 * indent_px;
             let galley = ui.painter().layout_job(line_job(doc, line, set, pal, font.clone(), query));
-            let width = (text_x + galley.size().x + 24.0).max(ui.available_width());
+            let is_marked = line.node == marked && line.kind != LineKind::Close;
+            let tag = is_marked.then(|| {
+                ui.painter().layout_no_wrap(
+                    crate::icons::text(crate::icons::Icon::GitCompare, "para comparar"),
+                    font.clone(),
+                    mark_color,
+                )
+            });
+            let tag_w = tag.as_ref().map_or(0.0, |g| g.size().x + 16.0);
+            let width = (text_x + galley.size().x + 24.0 + tag_w).max(ui.available_width());
             let (rect, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
             if !ui.is_rect_visible(rect) {
                 continue;
             }
             let p = ui.painter();
+            if is_marked {
+                p.rect_filled(rect, 0.0, mark_bg);
+            }
             if line.node == selected {
                 p.rect_filled(rect, 0.0, sel_bg);
+            } else if multi.binary_search(&line.node).is_ok() {
+                p.rect_filled(rect, 0.0, multi_bg);
             } else if resp.hovered() {
                 p.rect_filled(rect, 0.0, hover_bg);
+            }
+            if is_marked {
+                p.rect_filled(Rect::from_min_size(rect.min, vec2(3.0, row_h)), 0.0, mark_color);
             }
             if set.line_numbers {
                 p.text(
@@ -486,14 +558,21 @@ pub fn ui(
                 let c = if resp.hovered() { arrow_color } else { arrow_color.gamma_multiply(0.75) };
                 common::triangle(p, arrow_rect.center(), row_h, t, c);
             }
-            p.galley(pos2(rect.left() + text_x, rect.center().y - galley.size().y / 2.0), galley, pal.plain);
-
-            if resp.clicked() || resp.secondary_clicked() {
-                select = Some(line.node);
+            let text_pos = pos2(rect.left() + text_x, rect.center().y - galley.size().y / 2.0);
+            let text_w = galley.size().x;
+            p.galley(text_pos, galley, pal.plain);
+            if let Some(tag) = tag {
+                p.galley(pos2(text_pos.x + text_w + 16.0, rect.center().y - tag.size().y / 2.0), tag, mark_color);
             }
+
             let on_arrow = resp.interact_pointer_pos().is_some_and(|pp| pp.x < arrow_rect.right());
+            let m = ui.input(|i| i.modifiers);
+            if resp.clicked() && !(foldable && on_arrow) {
+                select = Some((line.node, m.command, m.shift));
+            } else if resp.secondary_clicked() {
+                select = Some((line.node, false, false));
+            }
             if foldable && resp.clicked() && on_arrow {
-                let m = ui.input(|i| i.modifiers);
                 let a = if m.shift {
                     Action::ExpandAll
                 } else if m.command {
@@ -513,7 +592,7 @@ pub fn ui(
                 );
             }
             resp.context_menu(|ui| {
-                if let Some(o) = context_menu(ui, doc, line.node, set, mark, &mut act) {
+                if let Some(o) = context_menu(ui, doc, line.node, set, mark, multi, &mut act) {
                     out = Some(o);
                 }
             });
@@ -522,12 +601,13 @@ pub fn ui(
     st.offset = output.state.offset.y;
     st.view_h = output.inner_rect.height();
 
-    if let Some(id) = select {
-        st.selected = id;
+    if let Some((id, ctrl, shift)) = select {
+        st.click(id, ctrl, shift);
     }
     if let Some((id, a)) = act {
         st.apply(doc, id, a, set);
         st.selected = id;
+        st.multi.clear();
     }
     out.or(key_out)
 }

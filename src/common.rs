@@ -2,13 +2,13 @@
 
 use eframe::egui::{self, Color32, Painter, Pos2, Shape, Stroke, Ui, vec2};
 
-use crate::json::{self, Doc, Kind, Layout, NodeId};
+use crate::json::{self, Doc, Kind, Layout, NONE, NodeId};
 use crate::settings::Settings;
 
 /// Petición de una vista hacia la aplicación.
 pub enum Out {
-    /// Abrir la ventana de cuadrícula para un arreglo.
-    Grid(NodeId),
+    /// Abrir una pestaña de tabla con estos elementos del arreglo `array`.
+    Table { array: NodeId, items: Vec<NodeId> },
     /// Agregar una clave al filtro.
     FilterKey(String),
     /// Marcar este nodo como lado izquierdo de una comparación de elementos.
@@ -45,6 +45,40 @@ pub fn triangle(p: &Painter, c: Pos2, size: f32, t: Tri, color: Color32) {
     } else {
         p.add(Shape::convex_polygon(pts, color, Stroke::NONE));
     }
+}
+
+/// Qué se puede ver como tabla desde el nodo `id`: el arreglo completo si es un arreglo,
+/// o —si es un elemento de un arreglo— los elementos seleccionados (`multi`) que sean sus
+/// hermanos, o todo el arreglo si no hay una selección de varios.
+pub fn table_choice(doc: &Doc, id: NodeId, multi: &[NodeId]) -> Option<(String, Out)> {
+    let n = doc.node(id);
+    if n.kind == Kind::Array {
+        if n.children.is_empty() {
+            return None;
+        }
+        let items = n.children.clone();
+        return Some((format!("Ver como tabla ({} elementos)", items.len()), Out::Table { array: id, items }));
+    }
+    if n.parent == NONE {
+        return None;
+    }
+    let p = doc.node(n.parent);
+    if p.kind != Kind::Array {
+        return None;
+    }
+    let mut items: Vec<NodeId> = multi.iter().copied().filter(|&m| doc.node(m).parent == n.parent).collect();
+    if !items.contains(&id) {
+        items.push(id);
+    }
+    items.sort_unstable();
+    if items.len() >= 2 {
+        let label = format!("Ver como tabla: {} elementos seleccionados", items.len());
+        return Some((label, Out::Table { array: n.parent, items }));
+    }
+    let path = doc.path(n.parent);
+    let name = path.rsplit('.').next().unwrap_or(&path);
+    let label = format!("Ver como tabla: todo el arreglo «{name}» ({} elementos)", p.children.len());
+    Some((label, Out::Table { array: n.parent, items: p.children.clone() }))
 }
 
 /// Opciones de copiado comunes a los menús contextuales.
@@ -107,13 +141,6 @@ pub fn node_menu(ui: &mut Ui, doc: &Doc, id: NodeId, set: &Settings, mark: Optio
         ui.separator();
         if ui.button("Filtrar por esta clave").clicked() {
             out = Some(Out::FilterKey(k.to_string()));
-            ui.close();
-        }
-    }
-    if n.kind == Kind::Array && !n.children.is_empty() {
-        ui.separator();
-        if ui.button("Ver como cuadrícula…").clicked() {
-            out = Some(Out::Grid(id));
             ui.close();
         }
     }
@@ -196,11 +223,15 @@ pub fn scroll_for_row(row: usize, row_h: f32, center: bool, offset: f32, view_h:
     }
 }
 
-/// Tecla G sobre un arreglo seleccionado: abrir la cuadrícula.
-pub fn grid_key(ui: &Ui, doc: &Doc, sel: NodeId) -> Option<Out> {
-    if sel == crate::json::NONE || !ui.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::G)) {
+/// Tecla G sobre el nodo seleccionado: abrir la tabla que corresponda.
+pub fn table_key(ui: &Ui, doc: &Doc, sel: NodeId, multi: &[NodeId]) -> Option<Out> {
+    if sel == NONE || !ui.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::G)) {
         return None;
     }
-    let n = doc.node(sel);
-    (n.kind == Kind::Array && !n.children.is_empty()).then_some(Out::Grid(sel))
+    table_choice(doc, sel, multi).map(|(_, out)| out)
+}
+
+/// Fondo con que se resalta el elemento «seleccionado para comparar».
+pub fn mark_bg(ui: &Ui) -> Color32 {
+    ui.visuals().hyperlink_color.gamma_multiply(0.18)
 }

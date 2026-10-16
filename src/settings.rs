@@ -3,12 +3,31 @@ use serde::{Deserialize, Serialize};
 use crate::import::ImportOptions;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[serde(from = "ViewCompat")]
 pub enum View {
+    Tree,
+    Text,
+    Source,
+}
+
+/// Nombres guardados por versiones anteriores (tenían vistas Tabla y Comparar).
+#[derive(Deserialize)]
+enum ViewCompat {
     Tree,
     Table,
     Text,
     Source,
     Compare,
+}
+
+impl From<ViewCompat> for View {
+    fn from(v: ViewCompat) -> Self {
+        match v {
+            ViewCompat::Text => View::Text,
+            ViewCompat::Source => View::Source,
+            ViewCompat::Tree | ViewCompat::Table | ViewCompat::Compare => View::Tree,
+        }
+    }
 }
 
 /// Cómo se pliega el árbol al abrir un documento.
@@ -40,7 +59,6 @@ pub struct Settings {
     pub quote_keys: bool,
     pub line_numbers: bool,
     pub compact_limit: usize,
-    pub table_preview: bool,
     /// Botones de nivel de la barra: el resto queda compacto en lugar de cerrado.
     pub level_compact: bool,
     pub view: View,
@@ -77,7 +95,6 @@ impl Default for Settings {
             quote_keys: true,
             line_numbers: true,
             compact_limit: 4000,
-            table_preview: true,
             level_compact: false,
             view: View::Tree,
             recent: Vec::new(),

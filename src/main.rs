@@ -3,7 +3,6 @@
 mod app;
 mod common;
 mod diff;
-mod grid;
 mod highlight;
 mod icons;
 mod import;

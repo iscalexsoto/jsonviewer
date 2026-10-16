@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Key, KeyboardShortcut, Modifiers,
-    Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2, pos2,
+    self, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Key, KeyboardShortcut,
+    Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2, pos2,
     text::{CCursor, CCursorRange},
     text_edit::TextEditState,
     vec2,
@@ -12,7 +12,6 @@ use eframe::egui::{
 
 use crate::common::{Mark, Out};
 use crate::diff::{self, Diff, DiffView};
-use crate::grid::{self, Grid};
 use crate::highlight::{self, Palette};
 use crate::icons::{self, Icon};
 use crate::import;
@@ -32,9 +31,11 @@ const SETTINGS_KEY: &str = "jsonviewer.settings";
 pub struct Loaded {
     pub doc: Doc,
     pub tree: TreeState,
-    pub table: TableState,
     pub text: TextState,
-    pub grid: Option<Grid>,
+    /// Vista de tabla (solo en pestañas de tabla; se construye al mostrarla).
+    pub table: Option<TableState>,
+    /// En un documento filtrado: id de cada nodo en el documento completo.
+    src: Vec<NodeId>,
     last_match: NodeId,
     parse_ms: f64,
 }
@@ -42,8 +43,107 @@ pub struct Loaded {
 impl Loaded {
     fn new(doc: Doc, set: &Settings, parse_ms: f64) -> Self {
         let tree = TreeState::new(&doc, set);
-        let table = TableState::new(&doc);
-        Self { doc, tree, table, text: TextState::default(), grid: None, last_match: NONE, parse_ms }
+        Self { doc, tree, text: TextState::default(), table: None, src: Vec::new(), last_match: NONE, parse_ms }
+    }
+}
+
+/// Qué es la pestaña, además de un documento.
+enum Mode {
+    Doc,
+    /// Tabla: el documento es un arreglo con una copia de los elementos elegidos en otra pestaña.
+    Table(TableMeta),
+    /// Comparación de dos documentos o elementos (sin documento propio).
+    Compare(Box<Compare>),
+}
+
+struct TableMeta {
+    /// Índice original de cada fila en el arreglo de origen.
+    orig: Vec<u32>,
+    /// Se muestra la tabla (si no, la vista elegida en la barra: árbol, texto o fuente).
+    show: bool,
+}
+
+/// Comparación de dos documentos o elementos (de la misma pestaña o de distintas), con
+/// copia propia de cada lado. Vive en su propia pestaña, como el diff de VS Code.
+pub struct Compare {
+    left: Doc,
+    right: Doc,
+    /// Encabezado de cada lado: archivo, ruta y línea.
+    labels: (String, String),
+    /// Copias filtradas por claves (solo mientras el filtro está activo).
+    filtered: Option<(Doc, Doc)>,
+    /// Coincidencias (de ambos lados) por cada clave del filtro.
+    filter_counts: Vec<usize>,
+    filter_gen: u64,
+    /// (ordenar claves, sangría, generación del filtro) con que se calculó `diff`.
+    key: Option<(bool, String, u64)>,
+    diff: Option<(Diff, DiffView)>,
+}
+
+impl Compare {
+    fn new(left: Doc, right: Doc, labels: (String, String)) -> Self {
+        Self { left, right, labels, filtered: None, filter_counts: Vec::new(), filter_gen: 0, key: None, diff: None }
+    }
+
+    fn docs(&self) -> (&Doc, &Doc) {
+        match &self.filtered {
+            Some((l, r)) => (l, r),
+            None => (&self.left, &self.right),
+        }
+    }
+
+    fn update_filter(&mut self, keys: &[&str], gen_: u64) {
+        if self.filter_gen == gen_ {
+            return;
+        }
+        self.filter_gen = gen_;
+        self.filtered = None;
+        self.filter_counts.clear();
+        if keys.is_empty() {
+            return;
+        }
+        let (l, r) = (self.left.filter_keys(keys), self.right.filter_keys(keys));
+        self.filter_counts = l.counts.iter().zip(&r.counts).map(|(a, b)| a + b).collect();
+        self.filtered = Some((l.doc, r.doc));
+    }
+
+    fn ensure(&mut self, set: &Settings) {
+        let gen_ = if self.filtered.is_some() { self.filter_gen } else { 0 };
+        let key = (set.diff_sort_keys, set.indent_str(), gen_);
+        if self.key.as_ref() != Some(&key) {
+            let (l, r) = self.docs();
+            let d = Diff::new(l, r, &key.1, key.0);
+            self.diff = Some((d, DiffView::default()));
+            self.key = Some(key);
+        }
+    }
+
+    fn swap(&mut self) {
+        std::mem::swap(&mut self.left, &mut self.right);
+        std::mem::swap(&mut self.labels.0, &mut self.labels.1);
+        if let Some((l, r)) = &mut self.filtered {
+            std::mem::swap(l, r);
+        }
+        self.key = None;
+        self.diff = None;
+    }
+}
+
+/// Nodo marcado con «Seleccionar para comparar».
+struct CompareMark {
+    /// Pestaña y versión del documento (y del filtro) donde se marcó.
+    uid: u64,
+    doc_gen: u64,
+    filter_gen: u64,
+    id: NodeId,
+    path: String,
+}
+
+impl CompareMark {
+    /// El marcador tal como lo ven las vistas de la pestaña `t`.
+    fn view<'a>(&'a self, t: &DocTab) -> Mark<'a> {
+        let same = t.uid == self.uid && t.shown_gen() == (self.doc_gen, self.filter_gen);
+        Mark { path: &self.path, id: if same { self.id } else { NONE } }
     }
 }
 
@@ -51,7 +151,11 @@ pub struct DocTab {
     uid: u64,
     title: String,
     path: Option<PathBuf>,
+    /// Archivo del que deriva una pestaña de tabla (para los títulos de las comparaciones).
+    origin: Option<String>,
     source: String,
+    /// Líneas de `source` (para el ancho de los números de línea del editor).
+    source_lines: usize,
     /// La fuente se editó y no se ha vuelto a analizar.
     source_dirty: bool,
     loaded: Option<Loaded>,
@@ -65,84 +169,28 @@ pub struct DocTab {
     filter_gen: u64,
     /// Aumenta cada vez que el documento se vuelve a analizar.
     doc_gen: u64,
-    /// Pestaña temporal de comparación entre dos elementos (sin documento propio).
-    compare: Option<ElemCompare>,
-}
-
-/// Comparación de dos elementos (de la misma pestaña o de distintas), con copia
-/// propia de cada subárbol. Vive en una pestaña temporal, como el diff de VS Code.
-pub struct ElemCompare {
-    left: Doc,
-    right: Doc,
-    /// Ruta de cada lado, precedida del nombre de la pestaña si no es la misma.
-    titles: (String, String),
-    /// (ordenar claves, sangría) con que se calculó `diff`.
-    key: Option<(bool, String)>,
-    diff: Option<(Diff, DiffView)>,
-}
-
-impl ElemCompare {
-    fn ensure(&mut self, set: &Settings) {
-        let key = (set.diff_sort_keys, set.indent_str());
-        if self.key.as_ref() != Some(&key) {
-            self.diff = Some((Diff::new(&self.left, &self.right, &key.1, key.0), DiffView::default()));
-            self.key = Some(key);
-        }
-    }
-
-    fn swap(&mut self) {
-        std::mem::swap(&mut self.left, &mut self.right);
-        std::mem::swap(&mut self.titles.0, &mut self.titles.1);
-        self.key = None;
-        self.diff = None;
-    }
-
-    /// Título corto para la pestaña: `Partidas[3] ↔ Partidas[7]` (último tramo de
-    /// cada ruta; la ruta completa si los dos tramos fueran iguales).
-    fn tab_title(&self) -> String {
-        let (a, b) = (self.titles.0.as_str(), self.titles.1.as_str());
-        fn last(t: &str) -> &str {
-            match t.rfind('.') {
-                Some(i) => &t[i + 1..],
-                None => t.strip_prefix('$').unwrap_or(t),
-            }
-        }
-        let (sa, sb) = (last(a), last(b));
-        if sa != sb && !sa.is_empty() && !sb.is_empty() {
-            format!("{sa} ↔ {sb}")
-        } else {
-            let full = |t: &str| t.strip_prefix("$.").unwrap_or(t).to_string();
-            format!("{} ↔ {}", full(a), full(b))
-        }
-    }
-}
-
-/// Nodo marcado con «Seleccionar para comparar».
-struct CompareMark {
-    /// Pestaña y versión del documento (y del filtro) donde se marcó.
-    uid: u64,
-    doc_gen: u64,
-    filter_gen: u64,
-    id: NodeId,
-    path: String,
-    tab_title: String,
-}
-
-impl CompareMark {
-    /// El marcador tal como lo ven las vistas de la pestaña `t`.
-    fn view<'a>(&'a self, t: &DocTab) -> Mark<'a> {
-        let same = t.uid == self.uid && t.shown_gen() == (self.doc_gen, self.filter_gen);
-        Mark { path: &self.path, id: if same { self.id } else { NONE } }
-    }
+    mode: Mode,
 }
 
 impl DocTab {
     fn new(uid: u64, title: String, path: Option<PathBuf>, source: String, set: &Settings) -> Self {
-        let mut t = Self {
+        let mut t = Self::empty(uid, title);
+        t.path = path;
+        t.set_source(source);
+        if !t.source.trim().is_empty() {
+            t.parse(set);
+        }
+        t
+    }
+
+    fn empty(uid: u64, title: String) -> Self {
+        Self {
             uid,
             title,
-            path,
-            source,
+            path: None,
+            origin: None,
+            source: String::new(),
+            source_lines: 1,
             source_dirty: false,
             loaded: None,
             error: None,
@@ -151,16 +199,40 @@ impl DocTab {
             filter_counts: Vec::new(),
             filter_gen: 0,
             doc_gen: 0,
-            compare: None,
-        };
-        if !t.source.trim().is_empty() {
-            t.parse(set);
+            mode: Mode::Doc,
         }
+    }
+
+    /// Pestaña con un documento ya analizado (la fuente es su JSON formateado).
+    fn with_doc(uid: u64, title: String, doc: Doc, set: &Settings) -> Self {
+        let mut t = Self::empty(uid, title);
+        t.set_source(json::to_string(&doc, Doc::ROOT, Layout::Pretty(&set.indent_str())));
+        t.loaded = Some(Loaded::new(doc, set, 0.0));
+        t.doc_gen = 1;
         t
     }
 
+    fn set_source(&mut self, source: String) {
+        self.source_lines = source.bytes().filter(|&b| b == b'\n').count() + 1;
+        self.source = source;
+    }
+
     fn is_blank(&self) -> bool {
-        self.path.is_none() && self.source.trim().is_empty() && self.compare.is_none()
+        self.path.is_none() && self.source.trim().is_empty() && matches!(self.mode, Mode::Doc)
+    }
+
+    fn is_compare(&self) -> bool {
+        matches!(self.mode, Mode::Compare(_))
+    }
+
+    /// Se muestra la tabla de una pestaña de tabla.
+    fn table_shown(&self) -> bool {
+        matches!(&self.mode, Mode::Table(m) if m.show)
+    }
+
+    /// Nombre del archivo (o de la pestaña) para los títulos de las comparaciones.
+    fn file_label(&self) -> &str {
+        self.origin.as_deref().unwrap_or(&self.title)
     }
 
     /// Versión del documento mostrado: cambia al reanalizar o al cambiar el filtro.
@@ -177,6 +249,24 @@ impl DocTab {
         if self.filtered.is_some() { self.filtered.as_mut() } else { self.loaded.as_mut() }
     }
 
+    /// Número de cada fila de la tabla (índice en el arreglo de origen), para el documento mostrado.
+    fn table_labels(&self) -> Option<Vec<u32>> {
+        let Mode::Table(m) = &self.mode else { return None };
+        let (l, full) = (self.shown()?, self.loaded.as_ref()?);
+        let labels = l
+            .doc
+            .node(Doc::ROOT)
+            .children
+            .iter()
+            .map(|&c| {
+                let in_full = if l.src.is_empty() { c } else { l.src[c as usize] };
+                let i = full.doc.node(in_full).index as usize;
+                m.orig.get(i).copied().unwrap_or(i as u32)
+            })
+            .collect();
+        Some(labels)
+    }
+
     fn update_filter(&mut self, keys: &[&str], gen_: u64, set: &Settings) {
         if self.filter_gen == gen_ {
             return;
@@ -190,11 +280,11 @@ impl DocTab {
         }
         let f = l.doc.filter_keys(keys);
         let mut v = Loaded::new(f.doc, set, 0.0);
+        v.src = f.src;
         // El camino hasta las coincidencias siempre abierto; lo encontrado según los ajustes.
         for (id, &on_path) in f.path.iter().enumerate() {
             if on_path {
                 v.tree.folds[id] = Fold::Expanded;
-                v.table.open[id] = true;
             }
         }
         self.filtered = Some(v);
@@ -262,15 +352,9 @@ pub struct App {
     /// Claves activas del filtro en el último cuadro, para detectar cambios.
     filter_sig: String,
     filter_gen: u64,
-    /// Pestaña con la que se compara la activa.
-    compare_with: Option<u64>,
-    diff: Option<(DiffKey, Diff, DiffView)>,
     /// Elemento marcado con «Seleccionar para comparar».
     mark: Option<CompareMark>,
 }
-
-/// (uid, versión del documento, generación del filtro) de cada lado, orden de claves, sangría.
-type DiffKey = ((u64, u64, u64), (u64, u64, u64), bool, String);
 
 /// Pestaña cuyo nombre se está editando.
 struct Rename {
@@ -302,8 +386,6 @@ impl App {
             rename: None,
             filter_sig: String::new(),
             filter_gen: 1,
-            compare_with: None,
-            diff: None,
             mark: None,
         };
         for f in files {
@@ -339,9 +421,14 @@ impl App {
 
     // ---------------------------------------------------------------- documentos
 
-    fn push_tab(&mut self, title: String, path: Option<PathBuf>, text: String) {
-        let tab = DocTab::new(self.next_uid, title, path, text, &self.set);
+    fn new_uid(&mut self) -> u64 {
         self.next_uid += 1;
+        self.next_uid - 1
+    }
+
+    fn push_tab(&mut self, title: String, path: Option<PathBuf>, text: String) {
+        let uid = self.new_uid();
+        let tab = DocTab::new(uid, title, path, text, &self.set);
         if let Some(e) = &tab.error {
             self.toast = Some((format!("JSON inválido: {e}"), Instant::now()));
         }
@@ -354,32 +441,48 @@ impl App {
         }
     }
 
-    fn open_path(&mut self, path: PathBuf) {
+    /// Inserta una pestaña derivada (tabla o comparación) junto a la activa y la activa.
+    fn insert_tab(&mut self, tab: DocTab) {
+        let at = (self.active + 1).min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.active = at;
+    }
+
+    /// Abre (o recarga) el archivo y devuelve el índice de su pestaña.
+    fn open_path(&mut self, path: PathBuf) -> Option<usize> {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
-            Err(e) => return self.notify(format!("No se pudo abrir {}: {e}", path.display())),
+            Err(e) => {
+                self.notify(format!("No se pudo abrir {}: {e}", path.display()));
+                return None;
+            }
         };
         let text = json::decode_bytes(&bytes);
         self.set.add_recent(&path.to_string_lossy());
         if let Some(i) = self.tabs.iter().position(|t| t.path.as_ref() == Some(&path)) {
             self.active = i;
             let t = &mut self.tabs[i];
-            t.source = text;
+            t.set_source(text);
             t.parse(&self.set);
-            return;
+            return Some(i);
         }
         let title = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
         self.push_tab(title, Some(path), text);
+        Some(self.active)
     }
 
-    fn open_dialog(&mut self) {
+    fn file_dialog(&self) -> rfd::FileDialog {
         let mut dlg = rfd::FileDialog::new()
             .add_filter("JSON", &["json", "jsonc", "json5", "geojson", "har", "txt", "log"])
             .add_filter("Todos los archivos", &["*"]);
         if let Some(dir) = self.tabs.get(self.active).and_then(|t| t.path.as_ref()).and_then(|p| p.parent()) {
             dlg = dlg.set_directory(dir);
         }
-        for f in dlg.pick_files().unwrap_or_default() {
+        dlg
+    }
+
+    fn open_dialog(&mut self) {
+        for f in self.file_dialog().pick_files().unwrap_or_default() {
             self.open_path(f);
         }
     }
@@ -465,6 +568,13 @@ impl App {
         }
     }
 
+    fn set_view(&mut self, v: View) {
+        self.set.view = v;
+        if let Some(Mode::Table(m)) = self.tabs.get_mut(self.active).map(|t| &mut t.mode) {
+            m.show = false;
+        }
+    }
+
     // ---------------------------------------------------------------- filtro
 
     /// Recalcula la vista filtrada de la pestaña activa si cambió el filtro o el documento.
@@ -475,7 +585,10 @@ impl App {
             self.filter_sig = sig;
             self.filter_gen += 1;
         }
-        if let Some(t) = self.tabs.get_mut(self.active) {
+        let Some(t) = self.tabs.get_mut(self.active) else { return };
+        if let Mode::Compare(c) = &mut t.mode {
+            c.update_filter(&keys, self.filter_gen);
+        } else {
             t.update_filter(&keys, self.filter_gen, &self.set);
         }
     }
@@ -490,117 +603,72 @@ impl App {
         self.set.show_filter = true;
     }
 
+    // ---------------------------------------------------------------- tabla
+
+    /// Abre una pestaña de tabla con `items` (elementos del arreglo `array` de la pestaña activa).
+    fn open_table(&mut self, array: NodeId, items: Vec<NodeId>) {
+        let Some(t) = self.tabs.get(self.active) else { return };
+        let Some(l) = t.shown() else { return };
+        if items.is_empty() {
+            return;
+        }
+        let doc = l.doc.array_of(&items);
+        // Índice de cada elemento en el arreglo original (aunque la pestaña esté filtrada).
+        let orig: Vec<u32> = items
+            .iter()
+            .map(|&i| match (&t.filtered, &t.loaded) {
+                (Some(f), Some(full)) if !f.src.is_empty() => full.doc.node(f.src[i as usize]).index,
+                _ => l.doc.node(i).index,
+            })
+            .collect();
+        let total = l.doc.node(array).children.len();
+        let file = t.file_label().to_string();
+        let path = l.doc.path(array);
+        let title = match path.strip_prefix("$.") {
+            None => format!("{file} (tabla)"),
+            Some(name) if items.len() == total => format!("{file} · {name}"),
+            Some(name) => format!("{file} · {name} ({} de {total})", items.len()),
+        };
+        let uid = self.new_uid();
+        let mut tab = DocTab::with_doc(uid, title, doc, &self.set);
+        tab.origin = Some(file);
+        tab.mode = Mode::Table(TableMeta { orig, show: true });
+        self.insert_tab(tab);
+    }
+
     // ---------------------------------------------------------------- comparación
 
-    /// Índice de la pestaña con la que se compara la activa. Si no hay una válida,
-    /// elige la anterior (o la siguiente).
-    fn compare_target(&mut self) -> Option<usize> {
-        let usable = |i: usize, t: &DocTab| i != self.active && t.compare.is_none();
-        let found = self.compare_with.and_then(|uid| self.tabs.iter().position(|t| t.uid == uid));
-        let i = match found.filter(|&i| usable(i, &self.tabs[i])) {
-            Some(i) => i,
-            None => {
-                // La anterior si sirve; si no, la más cercana que tenga documento.
-                let prev = self.active.checked_sub(1).filter(|&i| usable(i, &self.tabs[i]));
-                let i = prev.or_else(|| self.tabs.iter().enumerate().position(|(i, t)| usable(i, t)))?;
-                self.compare_with = Some(self.tabs[i].uid);
-                i
-            }
+    /// Abre una pestaña de comparación entre dos lados ya copiados.
+    fn insert_compare(&mut self, left: Doc, right: Doc, labels: (String, String), title: String) {
+        let uid = self.new_uid();
+        let mut tab = DocTab::empty(uid, title);
+        tab.mode = Mode::Compare(Box::new(Compare::new(left, right, labels)));
+        self.insert_tab(tab);
+    }
+
+    /// Compara el documento completo de dos pestañas (la primera a la izquierda).
+    fn compare_tabs(&mut self, li: usize, ri: usize) {
+        let (Some(lt), Some(rt)) = (self.tabs.get(li), self.tabs.get(ri)) else { return };
+        let (Some(l), Some(r)) = (lt.loaded.as_ref(), rt.loaded.as_ref()) else {
+            return self.notify("Una de las dos pestañas no tiene un JSON válido");
         };
-        Some(i)
+        let (left, right) = (l.doc.subtree(Doc::ROOT), r.doc.subtree(Doc::ROOT));
+        let labels = (lt.title.clone(), rt.title.clone());
+        let title = format!("{} ↔ {}", lt.file_label(), rt.file_label());
+        self.active = li;
+        self.insert_compare(left, right, labels, title);
     }
 
-    /// Recalcula la comparación si cambió alguno de los documentos o las opciones.
-    fn ensure_diff(&mut self) -> Option<usize> {
-        let ri = self.compare_target()?;
-        let keys = self.set.active_filter();
-        self.tabs[ri].update_filter(&keys, self.filter_gen, &self.set);
-        let (l, r) = (&self.tabs[self.active], &self.tabs[ri]);
-        let (ld, rd) = (l.shown()?, r.shown()?);
-        let ver = |t: &DocTab| (t.uid, t.doc_gen, if t.filtered.is_some() { t.filter_gen } else { 0 });
-        let key = (ver(l), ver(r), self.set.diff_sort_keys, self.set.indent_str());
-        if self.diff.as_ref().is_none_or(|(k, _, _)| *k != key) {
-            let d = Diff::new(&ld.doc, &rd.doc, &key.3, key.2);
-            self.diff = Some((key, d, DiffView::default()));
+    /// Elige un archivo, lo abre en una pestaña y lo compara con la pestaña `li`.
+    fn compare_with_file(&mut self, li: usize) {
+        let Some(path) = self.file_dialog().pick_file() else { return };
+        let uid = self.tabs.get(li).map(|t| t.uid);
+        let Some(ri) = self.open_path(path) else { return };
+        // Abrir puede mover las pestañas: se vuelve a buscar la original por su id.
+        let Some(li) = self.tabs.iter().position(|t| Some(t.uid) == uid) else { return };
+        if li != ri {
+            self.compare_tabs(li, ri);
         }
-        Some(ri)
-    }
-
-    fn compare_toolbar(&mut self, ui: &mut Ui) {
-        let others: Vec<(u64, String)> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|&(i, t)| i != self.active && t.compare.is_none())
-            .map(|(_, t)| (t.uid, t.title.clone()))
-            .collect();
-        let Some(ri) = self.ensure_diff().or_else(|| self.compare_target()) else {
-            ui.label(RichText::new("Abre otro JSON en una pestaña para comparar").weak());
-            return;
-        };
-        let current = self.tabs[ri].title.clone();
-        egui::ComboBox::from_id_salt("compare_with")
-            .selected_text(current)
-            .width(150.0)
-            .show_ui(ui, |ui| {
-                for (uid, title) in &others {
-                    ui.selectable_value(&mut self.compare_with, Some(*uid), title);
-                }
-            })
-            .response
-            .on_hover_text("Pestaña con la que se compara la activa (a la derecha)");
-        if icons::button(ui, Icon::ArrowLeftRight, "Intercambiar lados").clicked() {
-            self.compare_with = Some(self.tabs[self.active].uid);
-            self.active = ri;
-        }
-        toolbar_sep(ui);
-        let diff = self.diff.as_mut().map(|(_, d, v)| (&*d, v));
-        diff_tools(ui, &mut self.set, diff);
-    }
-
-    /// Barra de la pestaña temporal de comparación de elementos.
-    fn elem_compare_toolbar(&mut self, ui: &mut Ui) {
-        let Some(c) = self.tabs.get_mut(self.active).and_then(|t| t.compare.as_mut()) else { return };
-        if icons::button(ui, Icon::ArrowLeftRight, "Intercambiar lados").clicked() {
-            c.swap();
-        }
-        toolbar_sep(ui);
-        c.ensure(&self.set);
-        diff_tools(ui, &mut self.set, c.diff.as_mut().map(|(d, v)| (&*d, v)));
-    }
-
-    fn compare_ui(&mut self, ui: &mut Ui) {
-        let Some(ri) = self.ensure_diff() else {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| {
-                if self.tabs.iter().filter(|t| t.compare.is_none()).count() < 2 {
-                    ui.label("Para comparar necesitas al menos dos pestañas.");
-                    ui.label(RichText::new("Abre o pega otro JSON (Ctrl+O, Ctrl+V) y vuelve a esta vista.").weak());
-                } else {
-                    ui.label("Una de las dos pestañas no tiene un JSON válido.");
-                }
-            });
-            return;
-        };
-        let query = self.search.to_ascii_lowercase();
-        let titles = (self.tabs[self.active].title.clone(), self.tabs[ri].title.clone());
-        let Some((_, d, v)) = self.diff.as_mut() else { return };
-        diff_body(ui, &mut self.set, &self.pal, &query, d, v, (&titles.0, &titles.1));
-    }
-
-    /// Contenido de la pestaña temporal de comparación de elementos.
-    fn elem_compare_ui(&mut self, ui: &mut Ui) {
-        let query = self.search.to_ascii_lowercase();
-        let Some(c) = self.tabs.get_mut(self.active).and_then(|t| t.compare.as_mut()) else { return };
-        c.ensure(&self.set);
-        let titles = (c.titles.0.as_str(), c.titles.1.as_str());
-        let Some((d, v)) = c.diff.as_mut() else { return };
-        diff_body(ui, &mut self.set, &self.pal, &query, d, v, titles);
-    }
-
-    /// La pestaña activa es una comparación de elementos.
-    fn on_elem_compare(&self) -> bool {
-        self.tabs.get(self.active).is_some_and(|t| t.compare.is_some())
     }
 
     /// Guarda el nodo marcado con «Seleccionar para comparar».
@@ -609,12 +677,11 @@ impl App {
         let Some(l) = t.shown() else { return };
         let (doc_gen, filter_gen) = t.shown_gen();
         let path = l.doc.path(id);
-        self.mark =
-            Some(CompareMark { uid: t.uid, doc_gen, filter_gen, id, path: path.clone(), tab_title: t.title.clone() });
+        self.mark = Some(CompareMark { uid: t.uid, doc_gen, filter_gen, id, path: path.clone() });
         self.notify(format!("Seleccionado para comparar: {path}. Clic derecho en otro elemento → «Comparar con…»"));
     }
 
-    /// Compara el nodo marcado con `id` de la pestaña activa en una pestaña temporal.
+    /// Compara el nodo marcado con `id` de la pestaña activa en una pestaña nueva.
     fn compare_with_mark(&mut self, id: NodeId) {
         let Some(m) = self.mark.as_ref() else { return };
         let Some(mi) = self.tabs.iter().position(|t| t.uid == m.uid) else {
@@ -626,37 +693,15 @@ impl App {
             self.mark = None;
             return self.notify("El documento cambió: vuelve a marcar el elemento a comparar");
         }
-        let (Some(ml), Some(rl)) = (mt.shown(), self.tabs[self.active].shown()) else { return };
+        let ct = &self.tabs[self.active];
+        let (Some(ml), Some(rl)) = (mt.shown(), ct.shown()) else { return };
         if mi == self.active && m.id == id {
             return self.notify("Elige un elemento distinto del marcado");
         }
-        let left = ml.doc.subtree(m.id);
-        let right = rl.doc.subtree(id);
-        let right_path = rl.doc.path(id);
-        let titles = if mi == self.active {
-            (m.path.clone(), right_path)
-        } else {
-            (format!("{} · {}", m.tab_title, m.path), format!("{} · {}", self.tabs[self.active].title, right_path))
-        };
-        let c = ElemCompare { left, right, titles, key: None, diff: None };
-        let title = c.tab_title();
-        // Una sola pestaña temporal: la siguiente comparación la reutiliza (como VS Code).
-        match self.tabs.iter().position(|t| t.compare.is_some()) {
-            Some(i) => {
-                let t = &mut self.tabs[i];
-                t.compare = Some(c);
-                t.title = title;
-                self.active = i;
-            }
-            None => {
-                let mut t = DocTab::new(self.next_uid, title, None, String::new(), &self.set);
-                self.next_uid += 1;
-                t.compare = Some(c);
-                let at = (self.active + 1).min(self.tabs.len());
-                self.tabs.insert(at, t);
-                self.active = at;
-            }
-        }
+        let (left, right) = (ml.doc.subtree(m.id), rl.doc.subtree(id));
+        let labels = (header_label(mt, &ml.doc, m.id), header_label(ct, &rl.doc, id));
+        let title = format!("{} ↔ {}", side_label(mt, &ml.doc, m.id), side_label(ct, &rl.doc, id));
+        self.insert_compare(left, right, labels, title);
     }
 
     fn current_view(&self) -> View {
@@ -676,11 +721,16 @@ impl App {
         let view = self.current_view();
         let indent = self.set.indent_str();
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
-        let found = match (if tab.compare.is_some() { View::Compare } else { view }, tab.shown_mut()) {
-            (View::Tree | View::Table, Some(l)) => {
+        // En la comparación la búsqueda solo resalta.
+        if tab.is_compare() {
+            return;
+        }
+        let in_table = tab.table_shown();
+        let found = match (view, tab.shown_mut()) {
+            (View::Tree, Some(l)) | (_, Some(l)) if in_table || view == View::Tree => {
                 let doc = &l.doc;
                 let n = doc.len() as u64;
-                let sel = if view == View::Tree { l.tree.selected } else { l.table.selected };
+                let sel = if in_table { l.table.as_ref().map_or(NONE, |t| t.selected) } else { l.tree.selected };
                 let start = if l.last_match != NONE && sel != NONE && doc.is_ancestor(sel, l.last_match) {
                     l.last_match
                 } else if sel != NONE {
@@ -698,10 +748,9 @@ impl App {
                     .find(|&i| highlight::node_matches(doc, doc.node(i), &q));
                 if let Some(i) = hit {
                     l.last_match = i;
-                    if view == View::Tree {
-                        l.tree.reveal(doc, i);
-                    } else {
-                        l.table.reveal(doc, i);
+                    match (in_table, l.table.as_mut()) {
+                        (true, Some(t)) => t.reveal(doc, i),
+                        _ => l.tree.reveal(doc, i),
                     }
                 }
                 hit.is_some()
@@ -710,8 +759,6 @@ impl App {
                 l.text.ensure(&l.doc, &indent);
                 l.text.find(&q, forward)
             }
-            // En la comparación la búsqueda solo resalta.
-            (View::Compare, _) => true,
             _ => find_in_source(ctx, tab, &q, forward),
         };
         if !found {
@@ -742,16 +789,10 @@ impl App {
     fn handle_input(&mut self, ctx: &egui::Context) {
         let sc = |m: Modifiers, k: Key| KeyboardShortcut::new(m, k);
         let (open, new, close, find, next, prev, reload, apply, next_tab, view) = ctx.input_mut(|i| {
-            let view = [
-                (Key::Num1, View::Tree),
-                (Key::Num2, View::Table),
-                (Key::Num3, View::Text),
-                (Key::Num4, View::Source),
-                (Key::Num5, View::Compare),
-            ]
-            .into_iter()
-            .find(|&(k, _)| i.consume_shortcut(&sc(Modifiers::COMMAND, k)))
-            .map(|(_, v)| v);
+            let view = [(Key::Num1, View::Tree), (Key::Num2, View::Text), (Key::Num3, View::Source)]
+                .into_iter()
+                .find(|&(k, _)| i.consume_shortcut(&sc(Modifiers::COMMAND, k)))
+                .map(|(_, v)| v);
             (
                 i.consume_shortcut(&sc(Modifiers::COMMAND, Key::O)),
                 i.consume_shortcut(&sc(Modifiers::COMMAND, Key::N)),
@@ -805,23 +846,17 @@ impl App {
         let (diff_next, diff_prev) = ctx.input_mut(|i| {
             (i.consume_shortcut(&sc(Modifiers::NONE, Key::F7)), i.consume_shortcut(&sc(Modifiers::SHIFT, Key::F7)))
         });
-        if diff_next || diff_prev {
-            let view = if self.on_elem_compare() {
-                self.tabs[self.active].compare.as_mut().and_then(|c| c.diff.as_mut()).map(|(_, v)| v)
-            } else if self.current_view() == View::Compare {
-                self.diff.as_mut().map(|(_, _, v)| v)
-            } else {
-                None
-            };
-            if let Some(v) = view {
-                v.step(diff_next);
-            }
+        if (diff_next || diff_prev)
+            && let Some(Mode::Compare(c)) = self.tabs.get_mut(self.active).map(|t| &mut t.mode)
+            && let Some((_, v)) = c.diff.as_mut()
+        {
+            v.step(diff_next);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&sc(Modifiers::NONE, Key::F2))) {
             self.start_rename(self.active);
         }
         if let Some(v) = view {
-            self.set.view = v;
+            self.set_view(v);
         }
 
         // Pegar fuera de un campo de texto = documento nuevo.
@@ -957,106 +992,130 @@ impl App {
             }
             toolbar_sep(ui);
 
-            // Vistas (sin efecto en una pestaña de comparación de elementos)
-            let elem_compare = self.on_elem_compare();
-            ui.add_enabled_ui(!elem_compare, |ui| {
+            // Vistas (sin efecto en una pestaña de comparación). Una pestaña de tabla
+            // tiene además el botón «Tabla».
+            let is_compare = self.tabs.get(self.active).is_some_and(|t| t.is_compare());
+            let table_shown = self.tabs.get(self.active).is_some_and(|t| t.table_shown());
+            let mut pick_view = None;
+            let mut pick_table = false;
+            ui.add_enabled_ui(!is_compare, |ui| {
+                if let Some(Mode::Table(m)) = self.tabs.get(self.active).map(|t| &t.mode)
+                    && icons::selectable(ui, m.show, Icon::Table, "Tabla: una fila por elemento").clicked()
+                {
+                    pick_table = true;
+                }
                 for (v, icon, label, key) in VIEWS {
-                    let on = !elem_compare && view == v;
+                    let on = !is_compare && !table_shown && view == v;
                     if icons::selectable(ui, on, icon, &format!("{label} ({key})")).clicked() {
-                        self.set.view = v;
+                        pick_view = Some(v);
                     }
                 }
             });
+            if pick_table && let Some(Mode::Table(m)) = self.tabs.get_mut(self.active).map(|t| &mut t.mode) {
+                m.show = true;
+            }
+            if let Some(v) = pick_view {
+                self.set_view(v);
+            }
             toolbar_sep(ui);
 
             // Herramientas de la vista
             let set = &mut self.set;
             let mut msg = None;
-            if elem_compare {
-                self.elem_compare_toolbar(ui);
-            } else if view == View::Compare {
-                self.compare_toolbar(ui);
-            } else if let Some(tab) = self.tabs.get_mut(self.active) {
-                match (view, tab.shown_mut()) {
-                    (View::Tree, Some(l)) => {
-                        if icons::button(ui, Icon::UnfoldVertical, "Expandir todo").clicked() {
-                            l.tree.set_all(Fold::Expanded);
-                        }
-                        if icons::button(ui, Icon::FoldVertical, "Cerrar todo").clicked() {
-                            l.tree.level(&l.doc, 1, Fold::Closed);
-                        }
-                        if icons::button(ui, Icon::ListCollapse, "Compactar todo: raíz abierta, cada hijo en una línea")
-                            .clicked()
-                        {
-                            l.tree.level(&l.doc, 1, Fold::Compact);
-                        }
-                        let auto_tip = format!(
-                            "Auto: compacta en una línea lo que quepa en {} columnas (se ajusta en Ajustes)",
-                            set.auto_width
-                        );
-                        if icons::button(ui, Icon::WandSparkles, &auto_tip).clicked() {
-                            l.tree.auto(&l.doc, Doc::ROOT, set);
-                        }
-                        icons::menu(ui, Icon::Layers, "Expandir hasta un nivel", |ui| {
-                            for lv in 1..=5 {
-                                if ui.button(format!("Nivel {lv}")).clicked() {
-                                    let rest = if set.level_compact { Fold::Compact } else { Fold::Closed };
-                                    l.tree.level(&l.doc, lv, rest);
-                                    ui.close();
-                                }
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Mode::Compare(c) = &mut tab.mode {
+                    if icons::button(ui, Icon::ArrowLeftRight, "Intercambiar lados").clicked() {
+                        c.swap();
+                    }
+                    toolbar_sep(ui);
+                    c.ensure(set);
+                    diff_tools(ui, set, c.diff.as_mut().map(|(d, v)| (&*d, v)));
+                } else if table_shown {
+                    if let Some(l) = tab.shown()
+                        && let Some(t) = &l.table
+                        && icons::button(ui, Icon::Copy, "Copiar la tabla (separada por tabuladores)").clicked()
+                    {
+                        ui.ctx().copy_text(table::to_tsv(&l.doc, t));
+                        msg = Some("Tabla copiada");
+                    }
+                } else {
+                    match (view, tab.shown_mut()) {
+                        (View::Tree, Some(l)) => {
+                            if icons::button(ui, Icon::UnfoldVertical, "Expandir todo").clicked() {
+                                l.tree.set_all(Fold::Expanded);
                             }
-                            ui.separator();
-                            ui.checkbox(&mut set.level_compact, "Resto compacto").on_hover_text(
-                                "Lo que queda fuera del nivel se compacta en una línea en vez de cerrarse",
+                            if icons::button(ui, Icon::FoldVertical, "Cerrar todo").clicked() {
+                                l.tree.level(&l.doc, 1, Fold::Closed);
+                            }
+                            if icons::button(
+                                ui,
+                                Icon::ListCollapse,
+                                "Compactar todo: raíz abierta, cada hijo en una línea",
+                            )
+                            .clicked()
+                            {
+                                l.tree.level(&l.doc, 1, Fold::Compact);
+                            }
+                            let auto_tip = format!(
+                                "Auto: compacta en una línea lo que quepa en {} columnas (se ajusta en Ajustes)",
+                                set.auto_width
                             );
-                        });
-                    }
-                    (View::Table, Some(l)) => {
-                        if icons::button(ui, Icon::UnfoldVertical, "Expandir todo").clicked() {
-                            l.table.set_open(&l.doc, Doc::ROOT, true, true);
-                        }
-                        if icons::button(ui, Icon::FoldVertical, "Contraer todo").clicked() {
-                            l.table.collapse_all();
-                        }
-                    }
-                    (View::Text, Some(l)) => {
-                        l.text.ensure(&l.doc, &set.indent_str());
-                        if icons::button(ui, Icon::Copy, "Copiar todo el texto").clicked() {
-                            ui.ctx().copy_text(l.text.text().to_string());
-                            msg = Some("Texto copiado");
-                        }
-                    }
-                    _ => {
-                        if icons::enabled_button(ui, tab.source_dirty, Icon::Check, "Aplicar cambios (Ctrl+Enter)")
-                            .clicked()
-                        {
-                            tab.parse(set);
-                        }
-                        let fmt = |src: &str, layout: Layout| {
-                            json::parse(src).map(|d| json::to_string(&d, Doc::ROOT, layout))
-                        };
-                        let format_tip = "Formatear: reescribe la fuente con sangría (quita comentarios)";
-                        if icons::button(ui, Icon::IndentIncrease, format_tip).clicked() {
-                            match fmt(&tab.source, Layout::Pretty(&set.indent_str())) {
-                                Ok(s) => {
-                                    tab.source = s;
-                                    tab.parse(set);
+                            if icons::button(ui, Icon::WandSparkles, &auto_tip).clicked() {
+                                l.tree.auto(&l.doc, Doc::ROOT, set);
+                            }
+                            icons::menu(ui, Icon::Layers, "Expandir hasta un nivel", |ui| {
+                                for lv in 1..=5 {
+                                    if ui.button(format!("Nivel {lv}")).clicked() {
+                                        let rest = if set.level_compact { Fold::Compact } else { Fold::Closed };
+                                        l.tree.level(&l.doc, lv, rest);
+                                        ui.close();
+                                    }
                                 }
-                                Err(_) => msg = Some("No se puede formatear: el JSON tiene errores"),
+                                ui.separator();
+                                ui.checkbox(&mut set.level_compact, "Resto compacto").on_hover_text(
+                                    "Lo que queda fuera del nivel se compacta en una línea en vez de cerrarse",
+                                );
+                            });
+                        }
+                        (View::Text, Some(l)) => {
+                            l.text.ensure(&l.doc, &set.indent_str());
+                            if icons::button(ui, Icon::Copy, "Copiar todo el texto").clicked() {
+                                ui.ctx().copy_text(l.text.text().to_string());
+                                msg = Some("Texto copiado");
                             }
                         }
-                        if icons::button(ui, Icon::Minimize2, "Minificar: todo en una línea").clicked() {
-                            match fmt(&tab.source, Layout::Minified) {
-                                Ok(s) => {
-                                    tab.source = s;
-                                    tab.parse(set);
-                                }
-                                Err(_) => msg = Some("No se puede minificar: el JSON tiene errores"),
+                        _ => {
+                            if icons::enabled_button(ui, tab.source_dirty, Icon::Check, "Aplicar cambios (Ctrl+Enter)")
+                                .clicked()
+                            {
+                                tab.parse(set);
                             }
-                        }
-                        if icons::button(ui, Icon::Copy, "Copiar la fuente").clicked() {
-                            ui.ctx().copy_text(tab.source.clone());
-                            msg = Some("Fuente copiada");
+                            let fmt = |src: &str, layout: Layout| {
+                                json::parse(src).map(|d| json::to_string(&d, Doc::ROOT, layout))
+                            };
+                            let format_tip = "Formatear: reescribe la fuente con sangría (quita comentarios)";
+                            if icons::button(ui, Icon::IndentIncrease, format_tip).clicked() {
+                                match fmt(&tab.source, Layout::Pretty(&set.indent_str())) {
+                                    Ok(s) => {
+                                        tab.set_source(s);
+                                        tab.parse(set);
+                                    }
+                                    Err(_) => msg = Some("No se puede formatear: el JSON tiene errores"),
+                                }
+                            }
+                            if icons::button(ui, Icon::Minimize2, "Minificar: todo en una línea").clicked() {
+                                match fmt(&tab.source, Layout::Minified) {
+                                    Ok(s) => {
+                                        tab.set_source(s);
+                                        tab.parse(set);
+                                    }
+                                    Err(_) => msg = Some("No se puede minificar: el JSON tiene errores"),
+                                }
+                            }
+                            if icons::button(ui, Icon::Copy, "Copiar la fuente").clicked() {
+                                ui.ctx().copy_text(tab.source.clone());
+                                msg = Some("Fuente copiada");
+                            }
                         }
                     }
                 }
@@ -1080,48 +1139,46 @@ impl App {
     }
 
     fn search_box(&mut self, ui: &mut Ui) {
-        {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let mut go = None;
-                if icons::button(ui, Icon::ChevronDown, "Siguiente coincidencia (F3 / Enter)").clicked() {
-                    go = Some(true);
-                }
-                if icons::button(ui, Icon::ChevronUp, "Coincidencia anterior (Mayús+F3 / Mayús+Enter)").clicked() {
-                    go = Some(false);
-                }
-                if let Some(c) = self.match_count() {
-                    ui.label(RichText::new(c.to_string()).weak()).on_hover_text(if c == 1 {
-                        "1 coincidencia"
-                    } else {
-                        "Coincidencias"
-                    });
-                }
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .id(Id::new("search_box"))
-                        .hint_text(icons::text(Icon::Search, "Buscar clave o valor (Ctrl+F)"))
-                        .desired_width(220.0),
-                );
-                if self.focus_search {
-                    // Seleccionar todo para sobrescribir la búsqueda anterior.
-                    let mut st = TextEditState::load(ui.ctx(), resp.id).unwrap_or_default();
-                    let n = self.search.chars().count();
-                    st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(n))));
-                    st.store(ui.ctx(), resp.id);
-                    resp.request_focus();
-                    self.focus_search = false;
-                }
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    go = Some(!ui.input(|i| i.modifiers.shift));
-                    resp.request_focus();
-                }
-                if let Some(fwd) = go {
-                    let ctx = ui.ctx().clone();
-                    self.find(&ctx, fwd);
-                }
-            });
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let mut go = None;
+            if icons::button(ui, Icon::ChevronDown, "Siguiente coincidencia (F3 / Enter)").clicked() {
+                go = Some(true);
+            }
+            if icons::button(ui, Icon::ChevronUp, "Coincidencia anterior (Mayús+F3 / Mayús+Enter)").clicked() {
+                go = Some(false);
+            }
+            if let Some(c) = self.match_count() {
+                ui.label(RichText::new(c.to_string()).weak()).on_hover_text(if c == 1 {
+                    "1 coincidencia"
+                } else {
+                    "Coincidencias"
+                });
+            }
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .id(Id::new("search_box"))
+                    .hint_text(icons::text(Icon::Search, "Buscar clave o valor (Ctrl+F)"))
+                    .desired_width(220.0),
+            );
+            if self.focus_search {
+                // Seleccionar todo para sobrescribir la búsqueda anterior.
+                let mut st = TextEditState::load(ui.ctx(), resp.id).unwrap_or_default();
+                let n = self.search.chars().count();
+                st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(n))));
+                st.store(ui.ctx(), resp.id);
+                resp.request_focus();
+                self.focus_search = false;
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                go = Some(!ui.input(|i| i.modifiers.shift));
+                resp.request_focus();
+            }
+            if let Some(fwd) = go {
+                let ctx = ui.ctx().clone();
+                self.find(&ctx, fwd);
+            }
+        });
     }
 
     fn tab_strip(&mut self, ui: &mut Ui) {
@@ -1133,6 +1190,9 @@ impl App {
         let mut bottom = None;
         let mut rects = Vec::with_capacity(self.tabs.len());
         let mut dragging = None;
+        // Pestañas con documento, para el submenú «Comparar con…».
+        let others: Vec<(u64, String)> =
+            self.tabs.iter().filter(|t| t.loaded.is_some()).map(|t| (t.uid, t.title.clone())).collect();
         ui.horizontal(|ui| {
             let tabs_w = (ui.available_width() - 340.0).max(120.0);
             egui::ScrollArea::horizontal().id_salt("tabs").max_width(tabs_w).show(ui, |ui| {
@@ -1150,7 +1210,7 @@ impl App {
                                 rect
                             }
                             None => {
-                                let (rect, act, dragged) = tab_widget(ui, t, active);
+                                let (rect, act, dragged) = tab_widget(ui, t, active, &others);
                                 if dragged {
                                     dragging = Some(i);
                                 }
@@ -1215,10 +1275,12 @@ impl App {
                 return;
             }
             Some((i, TabAction::Rename)) => self.start_rename(i),
-            Some((i, TabAction::CompareWithActive)) => {
-                self.compare_with = Some(self.tabs[i].uid);
-                self.set.view = View::Compare;
+            Some((i, TabAction::CompareWith(uid))) => {
+                if let Some(ri) = self.tabs.iter().position(|t| t.uid == uid) {
+                    self.compare_tabs(i, ri);
+                }
             }
+            Some((i, TabAction::CompareWithFile)) => self.compare_with_file(i),
             Some((i, TabAction::CopyPath)) => {
                 if let Some(p) = &self.tabs[i].path {
                     ui.ctx().copy_text(p.display().to_string());
@@ -1260,15 +1322,19 @@ impl App {
         ui.horizontal(|ui| {
             if let Some(tab) = self.tabs.get(self.active) {
                 if let Some(l) = tab.shown() {
-                    let sel = match view {
-                        View::Tree => l.tree.selected,
-                        View::Table => l.table.selected,
-                        _ => NONE,
+                    let sel = if tab.table_shown() {
+                        l.table.as_ref().map_or(NONE, |t| t.selected)
+                    } else if view == View::Tree {
+                        l.tree.selected
+                    } else {
+                        NONE
                     };
                     if sel != NONE {
                         let path = l.doc.path(sel);
+                        let line = l.doc.node(sel).line;
+                        let text = if l.doc.src_lines > 1 { format!("{path}  · línea {line}") } else { path.clone() };
                         if ui
-                            .add(egui::Label::new(RichText::new(&path).monospace()).sense(egui::Sense::click()))
+                            .add(egui::Label::new(RichText::new(text).monospace()).sense(egui::Sense::click()))
                             .on_hover_text("Clic para copiar la ruta")
                             .clicked()
                         {
@@ -1278,37 +1344,51 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(c) = self.tabs.get(self.active).and_then(|t| t.compare.as_ref()) {
-                    if let Some((d, _)) = &c.diff {
-                        let s = format!(
-                            "{} ↔ {} nodos · +{} −{} ~{} líneas",
-                            c.left.len(),
-                            c.right.len(),
-                            d.added,
-                            d.removed,
-                            d.modified
-                        );
-                        ui.label(RichText::new(s).weak());
-                    }
-                } else if let Some(tab) = self.tabs.get(self.active) {
-                    let mut parts = vec![human_size(tab.source.len())];
-                    if let (Some(l), Some(full)) = (tab.shown(), &tab.loaded) {
-                        parts.insert(
-                            0,
-                            if tab.filtered.is_some() {
-                                format!("{} de {} nodos (filtrado)", l.doc.len(), full.doc.len())
-                            } else {
-                                format!("{} nodos", l.doc.len())
-                            },
-                        );
-                        match view {
-                            View::Tree => parts.insert(1, format!("{} líneas", l.tree.line_count())),
-                            View::Text => parts.insert(1, format!("{} líneas", l.text.line_count())),
-                            _ => {}
+                if let Some(tab) = self.tabs.get(self.active) {
+                    match &tab.mode {
+                        Mode::Compare(c) => {
+                            if let Some((d, _)) = &c.diff {
+                                let (l, r) = c.docs();
+                                let s = format!(
+                                    "{} ↔ {} nodos · +{} −{} ~{} líneas",
+                                    l.len(),
+                                    r.len(),
+                                    d.added,
+                                    d.removed,
+                                    d.modified
+                                );
+                                ui.label(RichText::new(s).weak());
+                            }
                         }
-                        parts.push(format!("{:.1} ms", full.parse_ms));
+                        _ => {
+                            let mut parts = vec![human_size(tab.source.len())];
+                            if let (Some(l), Some(full)) = (tab.shown(), &tab.loaded) {
+                                parts.insert(
+                                    0,
+                                    if tab.filtered.is_some() {
+                                        format!("{} de {} nodos (filtrado)", l.doc.len(), full.doc.len())
+                                    } else {
+                                        format!("{} nodos", l.doc.len())
+                                    },
+                                );
+                                if tab.table_shown() {
+                                    if let Some(t) = &l.table {
+                                        parts.insert(0, format!("{} filas × {} columnas", t.rows(&l.doc), t.cols()));
+                                    }
+                                } else {
+                                    match view {
+                                        View::Tree => parts.insert(1, format!("{} líneas", l.tree.line_count())),
+                                        View::Text => parts.insert(1, format!("{} líneas", l.text.line_count())),
+                                        View::Source => parts.insert(1, format!("{} líneas", tab.source_lines)),
+                                    }
+                                }
+                                if full.parse_ms > 0.0 {
+                                    parts.push(format!("{:.1} ms", full.parse_ms));
+                                }
+                            }
+                            ui.label(RichText::new(parts.join(" · ")).weak());
+                        }
                     }
-                    ui.label(RichText::new(parts.join(" · ")).weak());
                 }
                 if let Some((m, _)) = &self.toast {
                     ui.separator();
@@ -1347,10 +1427,10 @@ impl App {
                 indent_picker(ui, &mut s.indent);
                 ui.end_row();
             });
+            ui.checkbox(&mut s.line_numbers, "Números de línea (árbol, texto y fuente)");
 
             ui.separator();
             ui.strong("Árbol");
-            ui.checkbox(&mut s.line_numbers, "Números de línea");
             ui.checkbox(&mut s.show_guides, "Guías de sangría");
             ui.checkbox(&mut s.show_counts, "Mostrar cantidad en nodos cerrados");
             ui.checkbox(&mut s.show_indices, "Mostrar índices de arreglo");
@@ -1375,10 +1455,6 @@ impl App {
                 ui.add(egui::DragValue::new(&mut s.initial_level).range(0..=50));
                 ui.end_row();
             });
-
-            ui.separator();
-            ui.strong("Tabla");
-            ui.checkbox(&mut s.table_preview, "Vista previa de objetos y arreglos");
 
             ui.separator();
             if ui.button(icons::text(Icon::RotateCcw, "Restablecer valores predeterminados")).clicked() {
@@ -1409,13 +1485,16 @@ impl App {
         // Coincidencias por fila, según la posición de la clave en el filtro activo.
         let counts: Vec<Option<usize>> = {
             let active = self.set.active_filter();
-            let tab = self.tabs.get(self.active).filter(|t| t.filtered.is_some());
+            let tab_counts: Option<&[usize]> = self.tabs.get(self.active).and_then(|t| match &t.mode {
+                Mode::Compare(c) => c.filtered.is_some().then_some(c.filter_counts.as_slice()),
+                _ => t.filtered.is_some().then_some(t.filter_counts.as_slice()),
+            });
             self.set
                 .filter_keys
                 .iter()
                 .map(|k| {
                     let pos = active.iter().position(|a| a.eq_ignore_ascii_case(k.trim()))?;
-                    tab.and_then(|t| t.filter_counts.get(pos).copied())
+                    tab_counts.and_then(|c| c.get(pos).copied())
                 })
                 .collect()
         };
@@ -1477,21 +1556,34 @@ impl App {
             }
             return;
         }
-        let view = self.current_view();
-        if self.on_elem_compare() {
-            self.elem_compare_ui(ui);
-            return;
-        }
-        if view == View::Compare {
-            self.compare_ui(ui);
-            return;
-        }
-        let keys = !ui.ctx().text_edit_focused();
+        let keys_free = !ui.ctx().text_edit_focused();
         let query = self.search.to_ascii_lowercase();
+        let active_filter = self.set.active_filter();
         let set = &self.set;
         let pal = &self.pal;
         let tab = &mut self.tabs[self.active];
         let mark = self.mark.as_ref().map(|m| m.view(tab));
+        let mut filter_off = false;
+
+        // Pestaña de comparación: aviso de filtro, lista de cambios y diff.
+        if let Mode::Compare(c) = &mut tab.mode {
+            if c.filtered.is_some() {
+                filter_off = filter_banner(ui, &active_filter, &c.filter_counts);
+            }
+            c.ensure(set);
+            let labels = (c.labels.0.as_str(), c.labels.1.as_str());
+            let mut want_all = false;
+            if let Some((d, v)) = c.diff.as_mut() {
+                want_all = diff_body(ui, set, pal, &query, d, v, labels);
+            }
+            if want_all {
+                self.set.diff_only_changes = false;
+            }
+            if filter_off {
+                self.set.filter_on = false;
+            }
+            return;
+        }
 
         if let Some(e) = tab.error.clone() {
             let mut goto = false;
@@ -1513,88 +1605,104 @@ impl App {
                     });
                 });
             if goto {
-                self.set.view = View::Source;
                 let id = tab.source_id();
                 let ctx = ui.ctx().clone();
                 let mut st = TextEditState::load(&ctx, id).unwrap_or_default();
                 st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(e.char_offset))));
                 st.store(&ctx, id);
                 ctx.memory_mut(|m| m.request_focus(id));
+                self.set_view(View::Source);
                 return;
             }
         }
 
-        let mut filter_off = false;
-        if tab.filtered.is_some() && view != View::Source {
-            let keys = set.active_filter();
-            let total: usize = tab.filter_counts.iter().sum();
-            let missing: Vec<&str> =
-                keys.iter().zip(&tab.filter_counts).filter(|(_, c)| **c == 0).map(|(k, _)| *k).collect();
-            egui::Frame::new()
-                .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.25))
-                .inner_margin(egui::Margin::symmetric(8, 4))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let what = if total == 1 { "coincidencia" } else { "coincidencias" };
-                        ui.label(icons::text(Icon::Filter, &format!("Filtro por claves: {total} {what}")));
-                        if !missing.is_empty() {
-                            ui.label(
-                                RichText::new(format!("· sin coincidencias: {}", missing.join(", ")))
-                                    .color(ui.visuals().warn_fg_color),
-                            );
-                        }
-                        if ui.small_button(icons::text(Icon::FilterX, "Quitar filtro")).clicked() {
-                            filter_off = true;
-                        }
-                    });
-                });
+        let table_shown = tab.table_shown();
+        let view = if tab.loaded.is_some() { set.view } else { View::Source };
+        if tab.filtered.is_some() && (table_shown || view != View::Source) {
+            filter_off = filter_banner(ui, &active_filter, &tab.filter_counts);
         }
 
         let mut out = None;
-        let mut reveal = None;
-        match (view, tab.shown_mut()) {
-            (View::Tree, Some(l)) => out = tree::ui(ui, &l.doc, &mut l.tree, set, pal, &query, keys, mark),
-            (View::Table, Some(l)) => out = table::ui(ui, &l.doc, &mut l.table, set, pal, &query, keys, mark),
-            (View::Text, Some(l)) => {
-                l.text.ensure(&l.doc, &set.indent_str());
-                text::show(ui, &mut l.text, set, pal, &query);
+        if table_shown {
+            let labels = tab.table_labels().unwrap_or_default();
+            if let Some(l) = tab.shown_mut() {
+                let Loaded { doc, table, .. } = l;
+                let st = table.get_or_insert_with(|| TableState::new(doc, labels));
+                out = table::ui(ui, doc, st, set, pal, &query, keys_free, mark);
             }
-            _ => source_ui(ui, tab, set),
-        }
-        if let Some(l) = tab.shown_mut() {
-            if let Some(Out::Grid(id)) = out {
-                l.grid = Some(Grid::new(&l.doc, id));
-            }
-            if let Some(g) = l.grid.as_mut() {
-                reveal = grid::window(ui.ctx(), &l.doc, g, pal, &query);
-                if !g.open {
-                    l.grid = None;
+        } else {
+            match (view, tab.shown_mut()) {
+                (View::Tree, Some(l)) => out = tree::ui(ui, &l.doc, &mut l.tree, set, pal, &query, keys_free, mark),
+                (View::Text, Some(l)) => {
+                    l.text.ensure(&l.doc, &set.indent_str());
+                    text::show(ui, &mut l.text, set, pal, &query);
                 }
+                _ => source_ui(ui, tab, set),
             }
-            if let Some(id) = reveal {
-                match view {
-                    View::Table => l.table.reveal(&l.doc, id),
-                    _ => l.tree.reveal(&l.doc, id),
-                }
-            }
-        }
-        if reveal.is_some() && !matches!(view, View::Tree | View::Table) {
-            self.set.view = View::Tree;
         }
         if filter_off {
             self.set.filter_on = false;
         }
         match out {
+            Some(Out::Table { array, items }) => self.open_table(array, items),
             Some(Out::FilterKey(k)) => self.add_filter_key(k),
             Some(Out::MarkCompare(id)) => self.mark_for_compare(id),
             Some(Out::CompareWithMark(id)) => self.compare_with_mark(id),
-            _ => {}
+            None => {}
         }
     }
 }
 
-/// Opciones y navegación de una comparación (compartidas por la vista Comparar y la
-/// pestaña de comparación de elementos).
+/// Etiqueta corta de un lado para el título de la pestaña: «archivo.json línea 12»
+/// (la ruta si el archivo es de una sola línea; solo el archivo si es la raíz).
+fn side_label(tab: &DocTab, doc: &Doc, id: NodeId) -> String {
+    let file = tab.file_label();
+    if id == Doc::ROOT {
+        return file.to_string();
+    }
+    if doc.src_lines > 1 {
+        format!("{file} línea {}", doc.node(id).line)
+    } else {
+        format!("{file} {}", doc.path(id).trim_start_matches('$').trim_start_matches('.'))
+    }
+}
+
+/// Encabezado completo de un lado: archivo, ruta y línea.
+fn header_label(tab: &DocTab, doc: &Doc, id: NodeId) -> String {
+    let mut s = format!("{} · {}", tab.file_label(), doc.path(id));
+    if id != Doc::ROOT && doc.src_lines > 1 {
+        s.push_str(&format!(" · línea {}", doc.node(id).line));
+    }
+    s
+}
+
+/// Aviso de filtro activo con sus coincidencias. Devuelve `true` si se pidió quitar el filtro.
+fn filter_banner(ui: &mut Ui, keys: &[&str], counts: &[usize]) -> bool {
+    let mut off = false;
+    let total: usize = counts.iter().sum();
+    let missing: Vec<&str> = keys.iter().zip(counts).filter(|(_, c)| **c == 0).map(|(k, _)| *k).collect();
+    egui::Frame::new()
+        .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.25))
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let what = if total == 1 { "coincidencia" } else { "coincidencias" };
+                ui.label(icons::text(Icon::Filter, &format!("Filtro por claves: {total} {what}")));
+                if !missing.is_empty() {
+                    ui.label(
+                        RichText::new(format!("· sin coincidencias: {}", missing.join(", ")))
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                if ui.small_button(icons::text(Icon::FilterX, "Quitar filtro")).clicked() {
+                    off = true;
+                }
+            });
+        });
+    off
+}
+
+/// Opciones y navegación de una comparación.
 fn diff_tools(ui: &mut Ui, set: &mut Settings, diff: Option<(&Diff, &mut DiffView)>) {
     icons::toggle(ui, &mut set.diff_sort_keys, Icon::ArrowDownAZ, "Ignorar orden de claves");
     icons::toggle(
@@ -1623,15 +1731,16 @@ fn diff_tools(ui: &mut Ui, set: &mut Settings, diff: Option<(&Diff, &mut DiffVie
 }
 
 /// Cuerpo de una comparación: aviso, lista de cambios y diff lado a lado.
+/// Devuelve `true` si se pidió ver todas las líneas (apagar «Solo diferencias»).
 fn diff_body(
     ui: &mut Ui,
-    set: &mut Settings,
+    set: &Settings,
     pal: &Palette,
     query: &str,
     d: &Diff,
     v: &mut DiffView,
     titles: (&str, &str),
-) {
+) -> bool {
     if d.approximate {
         ui.label(
             RichText::new("Documentos muy distintos: la alineación de líneas es aproximada.")
@@ -1642,17 +1751,13 @@ fn diff_body(
         egui::Panel::right("diff_changes").default_size(320.0).show(ui, |ui| diff::changes_list(ui, d, v));
     }
     diff::show(ui, d, v, titles, set.diff_only_changes, pal, query);
-    if std::mem::take(&mut v.want_all) {
-        set.diff_only_changes = false;
-    }
+    std::mem::take(&mut v.want_all)
 }
 
-const VIEWS: [(View, Icon, &str, &str); 5] = [
+const VIEWS: [(View, Icon, &str, &str); 3] = [
     (View::Tree, Icon::ListTree, "Árbol", "Ctrl+1"),
-    (View::Table, Icon::Table, "Tabla", "Ctrl+2"),
-    (View::Text, Icon::FileJson, "Texto formateado", "Ctrl+3"),
-    (View::Source, Icon::SquarePen, "Fuente: editar el texto original", "Ctrl+4"),
-    (View::Compare, Icon::GitCompare, "Comparar dos pestañas", "Ctrl+5"),
+    (View::Text, Icon::FileJson, "Texto formateado", "Ctrl+2"),
+    (View::Source, Icon::SquarePen, "Fuente: editar el texto original", "Ctrl+3"),
 ];
 
 /// Separador vertical con un poco de aire a los lados.
@@ -1676,7 +1781,10 @@ enum TabAction {
     CloseOthers,
     Rename,
     CopyPath,
-    CompareWithActive,
+    /// Comparar esta pestaña (izquierda) con la del id dado (derecha).
+    CompareWith(u64),
+    /// Comparar esta pestaña con un archivo que se elige en el momento.
+    CompareWithFile,
 }
 
 const TAB_PAD: f32 = 10.0;
@@ -1709,9 +1817,14 @@ fn paint_tab_bg(ui: &Ui, rect: Rect, active: bool, hovered: bool) {
 }
 
 /// Dibuja una pestaña. Devuelve su rectángulo, la acción pedida y si se está arrastrando.
-fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool) -> (Rect, Option<TabAction>, bool) {
+/// `others`: pestañas con documento, para el submenú «Comparar con…».
+fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool, others: &[(u64, String)]) -> (Rect, Option<TabAction>, bool) {
     let font = TextStyle::Button.resolve(ui.style());
-    let mut label = t.title.clone();
+    let mut label = match &t.mode {
+        Mode::Table(_) => icons::text(Icon::Table, &t.title),
+        Mode::Compare(_) => icons::text(Icon::GitCompare, &t.title),
+        Mode::Doc => t.title.clone(),
+    };
     if t.error.is_some() {
         label.push(' ');
         label.push(Icon::TriangleAlert.unicode());
@@ -1758,14 +1871,18 @@ fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool) -> (Rect, Option<TabAction>
         p.circle_filled(c, 3.5, color);
     }
 
-    let hover = match (&t.compare, &t.path) {
-        (Some(c), _) => format!(
-            "Comparación de elementos (pestaña temporal: la siguiente comparación la reutiliza)\n{}\n{}",
-            icons::text(Icon::ArrowLeft, &c.titles.0),
-            icons::text(Icon::ArrowRight, &c.titles.1)
+    let rename_tip = "Doble clic o F2 para cambiar el nombre";
+    let hover = match (&t.mode, &t.path) {
+        (Mode::Compare(c), _) => format!(
+            "Comparación (copia de cada lado al momento de compararlos)\n{}\n{}",
+            icons::text(Icon::ArrowLeft, &c.labels.0),
+            icons::text(Icon::ArrowRight, &c.labels.1)
         ),
-        (None, Some(p)) => format!("{}\nDoble clic o F2 para cambiar el nombre", p.display()),
-        (None, None) => "Sin archivo\nDoble clic o F2 para cambiar el nombre".to_string(),
+        (Mode::Table(_), _) => {
+            format!("Tabla de elementos de {}\n{rename_tip}", t.origin.as_deref().unwrap_or("otra pestaña"))
+        }
+        (Mode::Doc, Some(p)) => format!("{}\n{rename_tip}", p.display()),
+        (Mode::Doc, None) => format!("Sin archivo\n{rename_tip}"),
     };
     let close = close.on_hover_text("Cerrar (Ctrl+W)");
     let resp = resp.on_hover_text(hover);
@@ -1788,11 +1905,26 @@ fn tab_widget(ui: &mut Ui, t: &DocTab, active: bool) -> (Rect, Option<TabAction>
         if t.path.is_some() && ui.button("Copiar ruta del archivo").clicked() {
             act = Some(TabAction::CopyPath);
         }
-        if !active
-            && t.compare.is_none()
-            && ui.add(egui::Button::new("Comparar con la pestaña activa").shortcut_text("Ctrl+5")).clicked()
-        {
-            act = Some(TabAction::CompareWithActive);
+        if t.loaded.is_some() {
+            ui.separator();
+            ui.menu_button(icons::text(Icon::GitCompare, "Comparar con…"), |ui| {
+                let mut any = false;
+                for (uid, title) in others.iter().filter(|(uid, _)| *uid != t.uid) {
+                    any = true;
+                    if ui.button(title).clicked() {
+                        act = Some(TabAction::CompareWith(*uid));
+                        ui.close();
+                    }
+                }
+                if !any {
+                    ui.add_enabled(false, egui::Button::new("(no hay otras pestañas con JSON)"));
+                }
+                ui.separator();
+                if ui.button(icons::text(Icon::FolderOpen, "Otro archivo…")).clicked() {
+                    act = Some(TabAction::CompareWithFile);
+                    ui.close();
+                }
+            });
         }
         ui.separator();
         if ui.add(egui::Button::new("Cerrar").shortcut_text("Ctrl+W")).clicked() {
@@ -1875,6 +2007,7 @@ fn welcome(ui: &mut Ui) -> Option<Welcome> {
     open
 }
 
+/// Editor de la fuente con números de línea en un margen a la izquierda.
 fn source_ui(ui: &mut Ui, tab: &mut DocTab, set: &Settings) {
     if tab.source.len() > SOURCE_EDIT_LIMIT && !tab.force_edit {
         ui.add_space(20.0);
@@ -1891,18 +2024,46 @@ fn source_ui(ui: &mut Ui, tab: &mut DocTab, set: &Settings) {
     }
     let id = tab.source_id();
     egui::ScrollArea::both().auto_shrink(false).id_salt(("source_scroll", tab.uid)).show(ui, |ui| {
-        let resp = ui.add(
-            egui::TextEdit::multiline(&mut tab.source)
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let font = TextStyle::Monospace.resolve(ui.style());
+            let gutter = set.line_numbers.then(|| {
+                let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+                let digits = (tab.source_lines.max(1).ilog10() + 1) as f32;
+                ui.allocate_exact_size(vec2(digits * char_w + 18.0, 0.0), Sense::hover()).0
+            });
+            let out = egui::TextEdit::multiline(&mut tab.source)
                 .id(id)
                 .code_editor()
                 .desired_width(f32::INFINITY)
                 .desired_rows(40)
                 .lock_focus(true)
-                .hint_text("Pega o escribe aquí el JSON…"),
-        );
-        if resp.changed() {
-            tab.source_dirty = true;
-        }
+                .hint_text("Pega o escribe aquí el JSON…")
+                .show(ui);
+            if out.response.response.changed() {
+                tab.source_dirty = true;
+                tab.source_lines = tab.source.bytes().filter(|&b| b == b'\n').count() + 1;
+            }
+            if let Some(g) = gutter {
+                let clip = ui.clip_rect();
+                let color = ui.visuals().weak_text_color();
+                let p = ui.painter();
+                // Cada fila del galley es una línea (no hay ajuste de línea); una fila que no
+                // sigue a un salto de línea sería la continuación de la anterior.
+                let (mut n, mut starts) = (1usize, true);
+                for row in &out.galley.rows {
+                    let y = out.galley_pos.y + row.pos.y;
+                    let h = row.row.size.y;
+                    if starts && y + h >= clip.top() && y <= clip.bottom() {
+                        p.text(pos2(g.right() - 10.0, y + h / 2.0), Align2::RIGHT_CENTER, n, font.clone(), color);
+                    }
+                    starts = row.ends_with_newline;
+                    if starts {
+                        n += 1;
+                    }
+                }
+            }
+        });
     });
     if tab.source_dirty && tab.source.len() <= LIVE_PARSE_LIMIT {
         tab.parse(set);
@@ -2028,29 +2189,31 @@ fn help_ui(ui: &mut Ui) {
             ("Ctrl+Tab", "Siguiente pestaña"),
             ("F2 / doble clic en pestaña", "Cambiar el nombre de la pestaña (se usa al guardar)"),
             ("F5", "Recargar archivo"),
-            ("Ctrl+1 … 5", "Árbol / Tabla / Texto / Fuente / Comparar"),
-            ("F7, Mayús+F7", "Comparar: diferencia siguiente / anterior"),
+            ("Ctrl+1 … 3", "Árbol / Texto / Fuente"),
+            ("F7, Mayús+F7", "Comparación: diferencia siguiente / anterior"),
             ("Ctrl+F, F3, Mayús+F3", "Buscar, siguiente, anterior"),
             ("Ctrl+Enter", "Aplicar cambios de la fuente"),
             ("", ""),
             ("↑ ↓ RePág AvPág Inicio Fin", "Moverse (árbol y tabla)"),
             ("← →", "Cerrar / expandir, ir al padre / primer hijo"),
             ("Enter, Espacio, doble clic", "Expandir/cerrar"),
+            ("Ctrl+clic, Mayús+clic", "Seleccionar varios elementos (para verlos como tabla)"),
             ("C", "Compactar nodo en una línea"),
             ("H", "Compactar hijos (cada hijo en una línea)"),
             ("X", "Cerrar hijos"),
             ("E", "Expandir todo el subárbol"),
             ("A", "Auto-compactar el subárbol"),
-            ("G", "Ver arreglo como cuadrícula"),
+            ("G", "Ver el arreglo (o los elementos seleccionados) como tabla"),
             ("Ctrl+C", "Copiar el valor seleccionado"),
             ("Ctrl+clic en ▶", "Compactar"),
             ("Alt+clic en ▶", "Compactar hijos"),
             ("Mayús+clic en ▶", "Expandir todo el subárbol"),
-            ("Clic derecho", "Más opciones: copiar ruta, cuadrícula, filtrar por clave…"),
+            ("Clic derecho", "Más opciones: copiar ruta, ver como tabla, filtrar por clave…"),
             (
                 "Clic derecho → Seleccionar para comparar",
                 "Marca un elemento; en otro, «Comparar con…» abre el diff en una pestaña",
             ),
+            ("Clic derecho en pestaña → Comparar con…", "Compara dos documentos completos"),
         ] {
             ui.label(RichText::new(k).monospace());
             ui.label(d);

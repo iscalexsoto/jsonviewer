@@ -26,17 +26,6 @@ impl Kind {
     pub fn is_container(self) -> bool {
         matches!(self, Kind::Object | Kind::Array)
     }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Kind::Object => "object",
-            Kind::Array => "array",
-            Kind::Str => "string",
-            Kind::Num => "number",
-            Kind::Bool => "bool",
-            Kind::Null => "null",
-        }
-    }
 }
 
 /// Índice de una clave internada en [`Doc`]; claves iguales comparten índice.
@@ -55,6 +44,8 @@ pub struct Node {
     /// texto original para números.
     text: (u32, u32),
     pub children: Vec<NodeId>,
+    /// Línea (desde 1) donde empieza el valor en el texto de origen.
+    pub line: u32,
 }
 
 impl Node {
@@ -69,6 +60,8 @@ pub struct Doc {
     pub nodes: Vec<Node>,
     keys: Vec<Box<str>>,
     strs: String,
+    /// Líneas del texto de origen (1 si estaba minificado).
+    pub src_lines: u32,
 }
 
 impl Doc {
@@ -195,6 +188,7 @@ impl Doc {
 
         // Los nodos del camino son los conservados que no están dentro de una coincidencia.
         let mut path = Vec::new();
+        let mut src = Vec::new();
         let mut map = vec![NONE; n];
         let mut nodes: Vec<Node> = Vec::new();
         let mut inside_end = 0;
@@ -204,6 +198,7 @@ impl Doc {
             }
             let id = nodes.len() as NodeId;
             map[i] = id;
+            src.push(i as NodeId);
             if i >= inside_end && hit(node).is_some() {
                 inside_end = self.subtree_end(i as NodeId) as usize;
             }
@@ -224,10 +219,11 @@ impl Doc {
                 key: node.key,
                 text: node.text,
                 children: Vec::new(),
+                line: node.line,
             });
         }
-        let doc = Doc { nodes, keys: self.keys.clone(), strs: self.strs.clone() };
-        KeyFilter { doc, counts, path }
+        let doc = Doc { nodes, keys: self.keys.clone(), strs: self.strs.clone(), src_lines: self.src_lines };
+        KeyFilter { doc, counts, path, src }
     }
 }
 
@@ -235,10 +231,41 @@ impl Doc {
     /// Copia independiente del subárbol de `id` como documento propio: el nodo
     /// pasa a ser la raíz (sin clave) y solo se conservan los textos que usa.
     pub fn subtree(&self, id: NodeId) -> Doc {
-        let (start, end) = (id as usize, self.subtree_end(id) as usize);
-        let base_depth = self.node(id).depth;
+        let mut nodes = Vec::with_capacity((self.subtree_end(id) - id) as usize);
         let mut strs = String::new();
-        let mut nodes = Vec::with_capacity(end - start);
+        self.copy_into(id, NONE, 0, &mut nodes, &mut strs);
+        Doc { nodes, keys: self.keys.clone(), strs, src_lines: self.src_lines }
+    }
+
+    /// Documento nuevo cuya raíz es un arreglo con una copia de cada uno de `items`
+    /// (en ese orden). Sirve para ver varios elementos como tabla.
+    pub fn array_of(&self, items: &[NodeId]) -> Doc {
+        let mut nodes = vec![Node {
+            kind: Kind::Array,
+            parent: NONE,
+            index: 0,
+            depth: 0,
+            key: NO_KEY,
+            text: (0, 0),
+            children: Vec::with_capacity(items.len()),
+            line: items.first().map_or(1, |&i| self.node(i).line),
+        }];
+        let mut strs = String::new();
+        for (i, &it) in items.iter().enumerate() {
+            let at = nodes.len() as NodeId;
+            self.copy_into(it, Doc::ROOT, i as u32, &mut nodes, &mut strs);
+            nodes[0].children.push(at);
+        }
+        Doc { nodes, keys: self.keys.clone(), strs, src_lines: self.src_lines }
+    }
+
+    /// Copia el subárbol de `id` al final de `nodes`, colgándolo de `parent` (id en el destino)
+    /// en la posición `index`; el nodo copiado pierde su clave.
+    fn copy_into(&self, id: NodeId, parent: NodeId, index: u32, nodes: &mut Vec<Node>, strs: &mut String) {
+        let (start, end) = (id as usize, self.subtree_end(id) as usize);
+        let base = nodes.len() as NodeId;
+        let base_depth = self.node(id).depth;
+        let depth0 = if parent == NONE { 0 } else { nodes[parent as usize].depth + 1 };
         for (i, n) in self.nodes[start..end].iter().enumerate() {
             let text = self.text_of(n);
             let at = strs.len() as u32;
@@ -246,15 +273,15 @@ impl Doc {
             let root = i == 0;
             nodes.push(Node {
                 kind: n.kind,
-                parent: if root { NONE } else { n.parent - id },
-                index: if root { 0 } else { n.index },
-                depth: n.depth - base_depth,
+                parent: if root { parent } else { n.parent - id + base },
+                index: if root { index } else { n.index },
+                depth: n.depth - base_depth + depth0,
                 key: if root { NO_KEY } else { n.key },
                 text: (at, text.len() as u32),
-                children: n.children.iter().map(|&c| c - id).collect(),
+                children: n.children.iter().map(|&c| c - id + base).collect(),
+                line: n.line,
             });
         }
-        Doc { nodes, keys: self.keys.clone(), strs }
     }
 }
 
@@ -265,6 +292,8 @@ pub struct KeyFilter {
     pub counts: Vec<usize>,
     /// Por nodo del documento filtrado: `true` si solo está como parte del camino.
     pub path: Vec<bool>,
+    /// Por nodo del documento filtrado: su id en el documento original.
+    pub src: Vec<NodeId>,
 }
 
 fn is_ident(s: &str) -> bool {
@@ -319,11 +348,22 @@ pub fn parse(src: &str) -> Result<Doc, ParseError> {
         keys: Vec::new(),
         key_ids: HashMap::new(),
         strs: String::new(),
+        starts: Vec::new(),
     };
     p.run()?;
     p.nodes.shrink_to_fit();
     p.strs.shrink_to_fit();
-    Ok(Doc { nodes: p.nodes, keys: p.keys, strs: p.strs })
+    // Línea de cada nodo: los nodos están en orden de aparición, así que basta una pasada.
+    let bytes = src.as_bytes();
+    let newlines = |r: &[u8]| r.iter().filter(|&&b| b == b'\n').count() as u32;
+    let (mut line, mut at) = (1u32, 0usize);
+    for (n, &start) in p.nodes.iter_mut().zip(&p.starts) {
+        line += newlines(&bytes[at..start]);
+        at = start;
+        n.line = line;
+    }
+    let src_lines = line + newlines(&bytes[at..]);
+    Ok(Doc { nodes: p.nodes, keys: p.keys, strs: p.strs, src_lines })
 }
 
 struct Parser<'a> {
@@ -335,6 +375,8 @@ struct Parser<'a> {
     keys: Vec<Box<str>>,
     key_ids: HashMap<Box<str>, KeyId>,
     strs: String,
+    /// Byte donde empieza cada nodo (para calcular su línea).
+    starts: Vec<usize>,
 }
 
 type PResult<T> = Result<T, ParseError>;
@@ -464,6 +506,7 @@ impl<'a> Parser<'a> {
     }
 
     fn value(&mut self, key: KeyId, parent: NodeId) -> PResult<()> {
+        let start = self.pos;
         let (kind, text) = match self.peek() {
             None => return self.err("Se esperaba un valor"),
             Some(b'{') => {
@@ -492,7 +535,8 @@ impl<'a> Parser<'a> {
             p.children.push(id);
             (p.depth + 1, (p.children.len() - 1) as u32)
         };
-        self.nodes.push(Node { kind, parent, index, depth, key, text, children: Vec::new() });
+        self.nodes.push(Node { kind, parent, index, depth, key, text, children: Vec::new(), line: 0 });
+        self.starts.push(start);
         if kind.is_container() {
             self.stack.push(id);
         }
@@ -908,6 +952,25 @@ mod tests {
         assert_eq!(sub.node(0).depth, 0);
         assert_eq!(sub.path(4), "$.t[1]");
         assert_eq!(sub.subtree_end(0), 5);
+
+        let both = doc.array_of(&doc.node(items).children);
+        assert_eq!(to_string(&both, 0, Layout::Minified), r#"[{"id":1,"t":"uno"},{"id":2,"t":["dos",null]}]"#);
+        let second = both.node(0).children[1];
+        assert_eq!((both.node(second).index, both.node(second).depth), (1, 1));
+        assert_eq!(both.path(second + 2), "$[1].t");
+        assert_eq!(both.subtree_end(0), both.len() as NodeId);
+    }
+
+    #[test]
+    fn source_lines() {
+        let doc = parse("{\n  \"a\": [\n    1,\n    {\"b\": 2}\n  ]\n}\n").unwrap();
+        let lines: Vec<u32> = doc.nodes.iter().map(|n| n.line).collect();
+        assert_eq!(lines, vec![1, 2, 3, 4, 4]);
+        assert_eq!(doc.src_lines, 7);
+        assert_eq!(parse("[1,2]").unwrap().src_lines, 1);
+        let f = doc.filter_keys(&["b"]);
+        assert_eq!(f.src, vec![0, 1, 3, 4]);
+        assert_eq!(f.doc.node(3).line, 4);
     }
 
     #[test]

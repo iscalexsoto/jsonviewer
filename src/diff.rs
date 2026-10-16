@@ -419,6 +419,7 @@ impl DiffView {
     pub fn position_label(&self) -> String {
         match self.current {
             Some(c) => format!("{} de {}", c + 1, self.shown_hunks.len()),
+            None if self.shown_hunks.len() == 1 => "1 diferencia".to_string(),
             None => format!("{} diferencias", self.shown_hunks.len()),
         }
     }
@@ -528,8 +529,10 @@ pub fn show(
         .scope_builder(egui::UiBuilder::new().max_rect(list_rect), |ui| {
             // Que la rueda horizontal no mueva el desplazamiento vertical.
             ui.style_mut().always_scroll_the_only_direction = false;
+            // Sin espacio entre filas, y fijado antes de `show_rows`, que lo usa para
+            // calcular cuántas filas caben (si no, deja un hueco al final).
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             area.show_rows(ui, row_h, shown.len(), |ui, range| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 for ri in range {
                     let row = shown[ri];
                     let (rect, resp) = ui.allocate_exact_size(vec2(half_w * 2.0, row_h), Sense::click());
