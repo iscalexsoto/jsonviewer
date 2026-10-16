@@ -120,7 +120,7 @@ documento (Auto, por nivel, expandir todo), comas, comillas en claves, índices 
 automáticamente.
 
 ### Actualizaciones
-Desde la versión 1.4.0 el programa avisa cuando hay una versión nueva publicada en
+El programa avisa cuando hay una versión nueva publicada en
 [GitHub](https://github.com/iscalexsoto/jsonviewer/releases) y puede instalarla él mismo:
 
 - Al iniciar consulta la última release (como mucho una vez al día y sin bloquear la ventana). Si hay una versión
