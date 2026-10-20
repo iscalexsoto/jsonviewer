@@ -1634,25 +1634,33 @@ impl App {
             |ui| {
                 for (i, k) in keys.iter_mut().enumerate() {
                     let last = i + 1 == n;
-                    ui.horizontal(|ui| {
-                        let edit = egui::TextEdit::singleline(k)
-                            .id(Id::new(("filter_key", i)))
-                            .hint_text(if last { "Agregar clave…" } else { "" })
-                            .font(TextStyle::Monospace)
-                            .desired_width(ui.available_width() - 52.0);
-                        let resp = ui.add(edit);
-                        if resp.lost_focus() && !last && k.trim().is_empty() {
-                            remove = Some(i);
-                        }
+                    // De derecha a izquierda: el campo ocupa lo que dejan el contador y el botón.
+                    // Con un hueco fijo, un contador ancho desbordaba la fila y el panel crecía sin parar.
+                    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+                    ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let start = ui.available_width();
                         if !last {
+                            if icons::small(ui, Icon::X, "Quitar esta clave").clicked() {
+                                remove = Some(i);
+                            }
                             match counts.get(i).copied().flatten() {
                                 Some(0) => ui.label(RichText::new("0").color(warn)).on_hover_text("Sin coincidencias"),
                                 Some(c) => ui.label(RichText::new(c.to_string()).weak()).on_hover_text("Coincidencias"),
                                 None => ui.label(""),
                             };
-                            if icons::small(ui, Icon::X, "Quitar esta clave").clicked() {
-                                remove = Some(i);
-                            }
+                        }
+                        let used = start - ui.available_width();
+                        if used < 52.0 {
+                            ui.add_space(52.0 - used);
+                        }
+                        let edit = egui::TextEdit::singleline(k)
+                            .id(Id::new(("filter_key", i)))
+                            .hint_text(if last { "Agregar clave…" } else { "" })
+                            .font(TextStyle::Monospace)
+                            .desired_width(ui.available_width());
+                        let resp = ui.add(edit);
+                        if resp.lost_focus() && !last && k.trim().is_empty() {
+                            remove = Some(i);
                         }
                     });
                 }
